@@ -40,6 +40,158 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "worktree strategy creates reuses and removes issue worktrees" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-worktree-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "primary")
+      origin_repo = Path.join(test_root, "origin.git")
+      peer_repo = Path.join(test_root, "peer")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      create_primary_repo!(primary_repo, origin_repo)
+      {_output, 0} = System.cmd("git", ["clone", origin_repo, peer_repo])
+      configure_git_user!(peer_repo)
+      File.write!(Path.join(peer_repo, "remote.txt"), "remote update\n")
+      git!(peer_repo, ["add", "remote.txt"])
+      git!(peer_repo, ["commit", "-m", "remote update"])
+      git!(peer_repo, ["push", "origin", "main"])
+      new_origin_head = git!(peer_repo, ["rev-parse", "HEAD"]) |> String.trim()
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo,
+        hook_after_create: "echo after_create >> hook.count"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-WT")
+
+      assert {:ok, expected_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(workspace_root, "MT-WT"))
+
+      assert workspace == expected_workspace
+      assert File.read!(Path.join(workspace, "README.md")) == "initial\n"
+      refute File.exists?(Path.join(workspace, "remote.txt"))
+      assert String.trim(File.read!(Path.join(workspace, "hook.count"))) == "after_create"
+      assert String.trim(git!(workspace, ["branch", "--show-current"])) == "auto/MT-WT"
+      assert git_branch_exists?(primary_repo, "auto/MT-WT")
+      assert String.trim(git!(primary_repo, ["rev-parse", "origin/main"])) == new_origin_head
+
+      assert {:ok, ^workspace} = Workspace.create_for_issue("MT-WT")
+      assert String.trim(File.read!(Path.join(workspace, "hook.count"))) == "after_create"
+
+      assert :ok = Workspace.remove_issue_workspaces("MT-WT")
+      refute File.exists?(workspace)
+      refute git_branch_exists?(primary_repo, "auto/MT-WT")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "worktree strategy can skip fetch before dispatch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-worktree-no-fetch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "primary")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      create_primary_repo!(primary_repo)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo,
+        workspace_fetch_before_dispatch: false
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-NO-FETCH")
+      assert File.read!(Path.join(workspace, "README.md")) == "initial\n"
+
+      assert :ok = Workspace.remove_issue_workspaces("MT-NO-FETCH")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "worktree strategy rejects existing directories that are not registered worktrees" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-worktree-stale-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "primary")
+      workspace_root = Path.join(test_root, "workspaces")
+      stale_workspace = Path.join(workspace_root, "MT-STALE")
+
+      create_primary_repo!(primary_repo)
+      File.mkdir_p!(stale_workspace)
+      File.write!(Path.join(stale_workspace, "stale.txt"), "manual directory\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo,
+        workspace_fetch_before_dispatch: false
+      )
+
+      assert {:ok, expected_workspace} = SymphonyElixir.PathSafety.canonicalize(stale_workspace)
+
+      assert {:error, {:workspace_not_registered_worktree, ^expected_workspace}} =
+               Workspace.create_for_issue("MT-STALE")
+
+      assert File.read!(Path.join(stale_workspace, "stale.txt")) == "manual directory\n"
+      refute git_branch_exists?(primary_repo, "auto/MT-STALE")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "worktree registration checks warn when git worktree list fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-worktree-list-fail-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "not-git")
+      workspace_root = Path.join(test_root, "workspaces")
+      stale_workspace = Path.join(workspace_root, "MT-WT-LIST-FAIL")
+
+      File.mkdir_p!(primary_repo)
+      File.mkdir_p!(stale_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo,
+        workspace_fetch_before_dispatch: false
+      )
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:workspace_not_registered_worktree, _workspace}} =
+                   Workspace.create_for_issue("MT-WT-LIST-FAIL")
+        end)
+
+      assert log =~ "Git worktree list failed"
+      assert log =~ primary_repo
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -1027,6 +1179,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.api_key == nil
     assert config.tracker.project_slug == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
+    assert config.workspace.strategy == "clone"
+    assert config.workspace.repo == nil
+    assert config.workspace.fetch_before_dispatch
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
@@ -1119,6 +1274,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
 
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_strategy: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "workspace.strategy"
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
       tracker_terminal_states: %{done: true},
@@ -1170,6 +1329,73 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
+  end
+
+  test "config validates local worktree repository settings" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-worktree-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "primary")
+      not_git_repo = Path.join(test_root, "not-git")
+      missing_repo = Path.join(test_root, "missing")
+
+      File.mkdir_p!(not_git_repo)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_strategy: "worktree",
+        workspace_repo: nil
+      )
+
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "workspace.repo is required"
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_strategy: "worktree",
+        workspace_repo: missing_repo
+      )
+
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "workspace.repo does not exist"
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_strategy: "worktree",
+        workspace_repo: not_git_repo
+      )
+
+      assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+      assert message =~ "workspace.repo is not a valid git repository"
+
+      create_primary_repo!(primary_repo)
+      File.write!(Path.join(primary_repo, "dirty.txt"), "dirty\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo
+      )
+
+      log =
+        capture_log(fn ->
+          assert :ok = Config.validate!()
+        end)
+
+      assert log =~ "Worktree primary clone has uncommitted changes"
+      assert log =~ primary_repo
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_strategy: "worktree",
+        workspace_repo: "~/remote-primary",
+        worker_ssh_hosts: ["worker-01"]
+      )
+
+      assert :ok = Config.validate!()
+      assert Config.settings!().workspace.repo == "~/remote-primary"
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do
@@ -1586,6 +1812,154 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ workspace_path
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "remote worktree lifecycle uses host-local repository paths" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-worktree-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+      workspace_root = "~/.symphony-remote-workspaces"
+      workspace_repo = "~/primary-clone"
+      workspace_path = "/remote/home/.symphony-remote-workspaces/MT-SSH-WT"
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+      case "$*" in
+        *"__SYMPHONY_WORKSPACE__"*)
+          printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{workspace_path}'
+          ;;
+      esac
+
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: workspace_repo,
+        worker_ssh_hosts: ["worker-01:2200"]
+      )
+
+      assert :ok = Config.validate!()
+      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WT", "worker-01:2200")
+      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WT", "worker-01:2200")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "~/primary-clone"
+      assert trace =~ "${repo#~/}"
+      assert trace =~ "git -C \"$repo\" fetch origin"
+      assert trace =~ "git -C \"$repo\" worktree add"
+      assert trace =~ "workspace_worktree_list_failed"
+      assert trace =~ "auto/MT-SSH-WT"
+      assert trace =~ "git -C \"$repo\" worktree remove --force"
+      refute trace =~ "git clone"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote worktree creation surfaces missing primary clone errors" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-remote-worktree-missing-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+    end)
+
+    try do
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      echo "workspace_repo_missing: /remote/missing-primary"
+      exit 41
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "/remote/workspaces",
+        workspace_strategy: "worktree",
+        workspace_repo: "/remote/missing-primary",
+        worker_ssh_hosts: ["worker-01"]
+      )
+
+      assert {:error, {:workspace_prepare_failed, "worker-01", 41, output}} =
+               Workspace.create_for_issue("MT-MISSING-REMOTE", "worker-01")
+
+      assert output =~ "workspace_repo_missing: /remote/missing-primary"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp create_primary_repo!(primary_repo, origin_repo \\ nil) do
+    File.mkdir_p!(primary_repo)
+    git!(primary_repo, ["init", "-b", "main"])
+    configure_git_user!(primary_repo)
+    File.write!(Path.join(primary_repo, "README.md"), "initial\n")
+    git!(primary_repo, ["add", "README.md"])
+    git!(primary_repo, ["commit", "-m", "initial"])
+
+    if is_binary(origin_repo) do
+      File.mkdir_p!(Path.dirname(origin_repo))
+      {_output, 0} = System.cmd("git", ["init", "--bare", origin_repo])
+      git!(primary_repo, ["remote", "add", "origin", origin_repo])
+      git!(primary_repo, ["push", "-u", "origin", "main"])
+      git!(primary_repo, ["fetch", "origin"])
+    end
+
+    :ok
+  end
+
+  defp configure_git_user!(repo) do
+    git!(repo, ["config", "user.name", "Test User"])
+    git!(repo, ["config", "user.email", "test@example.com"])
+  end
+
+  defp git!(repo, args) do
+    case System.cmd("git", ["-C", repo | args], stderr_to_stdout: true) do
+      {output, 0} -> output
+      {output, status} -> flunk("git #{Enum.join(args, " ")} failed with status #{status}: #{output}")
+    end
+  end
+
+  defp git_branch_exists?(repo, branch) do
+    case System.cmd("git", ["-C", repo, "rev-parse", "--verify", "refs/heads/#{branch}"], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _status} -> false
     end
   end
 end

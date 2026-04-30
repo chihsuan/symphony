@@ -400,6 +400,17 @@ Fields:
   - `~` is expanded.
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
+- `strategy` (`clone` or `worktree`)
+  - Default: `clone`.
+  - `clone` preserves the existing directory lifecycle; repository population is handled by hooks.
+  - `worktree` creates issue workspaces with `git worktree` from `workspace.repo`.
+- `repo` (path string or `$VAR`, REQUIRED when `strategy == worktree`)
+  - Path to the primary clone used for `git worktree add`.
+  - For SSH workers, this path is interpreted on the remote worker host.
+- `fetch_before_dispatch` (boolean)
+  - Default: `true`.
+  - When `strategy == worktree`, fetches `origin` in the primary clone before preparing an issue
+    workspace.
 
 #### 5.3.4 `hooks` (object)
 
@@ -633,6 +644,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `workspace.strategy`: `clone` or `worktree`, default `clone`
+- `workspace.repo`: path to the primary clone when `workspace.strategy == worktree`
+- `workspace.fetch_before_dispatch`: boolean, default `true`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -881,6 +895,10 @@ Workspace persistence:
 
 - Workspaces are reused across runs for the same issue.
 - Successful runs do not auto-delete workspaces.
+- With `workspace.strategy == worktree`, cleanup removes the registered worktree with
+  `git worktree remove --force` and deletes Symphony's `auto/<issue.identifier>` branch.
+  Forced worktree removal also deletes the working directory on disk, including any
+  uncommitted changes inside that worktree.
 
 ### 9.2 Workspace Creation and Reuse
 
@@ -890,21 +908,28 @@ Algorithm summary:
 
 1. Sanitize identifier to `workspace_key`.
 2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
-4. Mark `created_now=true` only if the directory was created during this call; otherwise
+3. If `workspace.strategy == clone`, ensure the workspace path exists as a directory.
+4. If `workspace.strategy == worktree`:
+   - Validate `workspace.repo` is configured for the current host.
+   - Fetch `origin` in `workspace.repo` when `workspace.fetch_before_dispatch == true`.
+   - Ensure the workspace is a registered git worktree for branch `auto/<issue.identifier>`,
+     creating it with `git worktree add` when absent.
+5. Mark `created_now=true` only if the directory or worktree was created during this call; otherwise
    `created_now=false`.
-5. Select effective hooks for the issue:
+6. Select effective hooks for the issue:
    - Use the first `routing` entry whose `requires_label` matches an issue label, if any.
    - Merge matched route hook values over top-level `hooks`.
    - Use top-level `hooks` when no route matches.
-6. If `created_now=true`, run the effective `after_create` hook if configured.
+7. If `created_now=true`, run the effective `after_create` hook if configured.
 
 Notes:
 
 - `before_run`, `after_run`, and `before_remove` use the same effective hook selection
   as `after_create`, so a matched route applies consistently to every workspace lifecycle
   hook execution point.
-- This section does not assume any specific repository/VCS workflow.
+- The `clone` strategy does not assume any specific repository/VCS workflow.
+- The `worktree` strategy owns branches named `auto/<issue.identifier>` and removes those branches
+  during workspace cleanup.
 - Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
   code generation) is implementation-defined and is typically handled via hooks.
 
