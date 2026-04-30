@@ -307,8 +307,15 @@ defmodule SymphonyElixir.Config.Schema do
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
+      %{} = policy when is_map_key(policy, "writableRoots") ->
         {:ok, policy}
+
+      %{} = policy ->
+        workspace_root = default_workspace_root(workspace, settings.workspace.root)
+
+        with {:ok, default_policy} <- default_runtime_turn_sandbox_policy(workspace_root, opts) do
+          {:ok, Map.merge(default_policy, policy)}
+        end
 
       _ ->
         workspace

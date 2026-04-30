@@ -371,6 +371,106 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
+  test "linear client filters candidate pickup by configured assignee" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "user-1")
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:candidate_query, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-1",
+                 "identifier" => "MT-1",
+                 "title" => "Assigned here",
+                 "state" => %{"name" => "Todo"},
+                 "assignee" => %{"id" => "user-1"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               },
+               %{
+                 "id" => "issue-2",
+                 "identifier" => "MT-2",
+                 "title" => "Assigned elsewhere",
+                 "state" => %{"name" => "Todo"},
+                 "assignee" => %{"id" => "user-2"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               },
+               %{
+                 "id" => "issue-3",
+                 "identifier" => "MT-3",
+                 "title" => "Unassigned",
+                 "state" => %{"name" => "Todo"},
+                 "assignee" => nil,
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, issues} = Client.fetch_candidate_issues_for_test(graphql_fun)
+
+    assert Enum.map(issues, & &1.identifier) == ["MT-1"]
+    assert Enum.all?(issues, & &1.assigned_to_worker)
+
+    assert_receive {:candidate_query, query,
+                    %{
+                      projectSlug: "project",
+                      stateNames: ["Todo", "In Progress"],
+                      first: 50,
+                      relationFirst: 50
+                    }}
+
+    assert query =~ "SymphonyLinearPoll"
+  end
+
+  test "linear client resolves assignee me before filtering candidate pickup" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "me")
+
+    graphql_fun = fn query, _variables ->
+      if query =~ "SymphonyLinearViewer" do
+        {:ok, %{"data" => %{"viewer" => %{"id" => "user-2"}}}}
+      else
+        {:ok,
+         %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [
+                 %{
+                   "id" => "issue-1",
+                   "identifier" => "MT-1",
+                   "title" => "Assigned elsewhere",
+                   "state" => %{"name" => "Todo"},
+                   "assignee" => %{"id" => "user-1"}
+                 },
+                 %{
+                   "id" => "issue-2",
+                   "identifier" => "MT-2",
+                   "title" => "Assigned to viewer",
+                   "state" => %{"name" => "Todo"},
+                   "assignee" => %{"id" => "user-2"}
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }}
+      end
+    end
+
+    assert {:ok, issues} = Client.fetch_candidate_issues_for_test(graphql_fun)
+
+    assert Enum.map(issues, & &1.identifier) == ["MT-2"]
+  end
+
   test "linear client pagination merge helper preserves issue ordering" do
     issue_page_1 = [
       %Issue{id: "issue-1", identifier: "MT-1"},
