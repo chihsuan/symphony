@@ -90,6 +90,7 @@ Minimal example:
 tracker:
   kind: linear
   project_slug: "..."
+  assignee: null
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -128,6 +129,10 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- Set `tracker.assignee` to a Linear user ID, or `me` to use the current API token's Linear viewer,
+  when you want one Symphony process to pick up only issues assigned to that user. If unset, all
+  active issues in the configured project are eligible. `tracker.assignee` reads from
+  `LINEAR_ASSIGNEE` when unset or when value is `$LINEAR_ASSIGNEE`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
