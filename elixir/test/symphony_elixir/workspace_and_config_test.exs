@@ -122,6 +122,76 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "worktree strategy rejects existing directories that are not registered worktrees" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-worktree-stale-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "primary")
+      workspace_root = Path.join(test_root, "workspaces")
+      stale_workspace = Path.join(workspace_root, "MT-STALE")
+
+      create_primary_repo!(primary_repo)
+      File.mkdir_p!(stale_workspace)
+      File.write!(Path.join(stale_workspace, "stale.txt"), "manual directory\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo,
+        workspace_fetch_before_dispatch: false
+      )
+
+      assert {:ok, expected_workspace} = SymphonyElixir.PathSafety.canonicalize(stale_workspace)
+
+      assert {:error, {:workspace_not_registered_worktree, ^expected_workspace}} =
+               Workspace.create_for_issue("MT-STALE")
+
+      assert File.read!(Path.join(stale_workspace, "stale.txt")) == "manual directory\n"
+      refute git_branch_exists?(primary_repo, "auto/MT-STALE")
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "worktree registration checks warn when git worktree list fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-worktree-list-fail-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "not-git")
+      workspace_root = Path.join(test_root, "workspaces")
+      stale_workspace = Path.join(workspace_root, "MT-WT-LIST-FAIL")
+
+      File.mkdir_p!(primary_repo)
+      File.mkdir_p!(stale_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: primary_repo,
+        workspace_fetch_before_dispatch: false
+      )
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:workspace_not_registered_worktree, _workspace}} =
+                   Workspace.create_for_issue("MT-WT-LIST-FAIL")
+        end)
+
+      assert log =~ "Git worktree list failed"
+      assert log =~ primary_repo
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -1774,6 +1844,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ "${repo#~/}"
       assert trace =~ "git -C \"$repo\" fetch origin"
       assert trace =~ "git -C \"$repo\" worktree add"
+      assert trace =~ "workspace_worktree_list_failed"
       assert trace =~ "auto/MT-SSH-WT"
       assert trace =~ "git -C \"$repo\" worktree remove --force"
       refute trace =~ "git clone"

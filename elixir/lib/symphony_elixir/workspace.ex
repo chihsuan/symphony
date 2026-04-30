@@ -117,7 +117,11 @@ defmodule SymphonyElixir.Workspace do
         "git -C \"$repo\" rev-parse --git-dir >/dev/null",
         settings.workspace.fetch_before_dispatch && "git -C \"$repo\" fetch origin",
         "if [ -d \"$workspace\" ]; then",
-        "  registered=$(git -C \"$repo\" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | grep -Fx \"$workspace\" || true)",
+        "  if ! worktrees=$(git -C \"$repo\" worktree list --porcelain); then",
+        "    echo \"workspace_worktree_list_failed: $repo\"",
+        "    exit 43",
+        "  fi",
+        "  registered=$(printf '%s\\n' \"$worktrees\" | awk '/^worktree / {print substr($0, 10)}' | grep -Fx \"$workspace\" || true)",
         "  if [ -z \"$registered\" ]; then",
         "    echo \"workspace_not_registered_worktree: $workspace\"",
         "    exit 42",
@@ -311,7 +315,11 @@ defmodule SymphonyElixir.Workspace do
         "  exit 41",
         "fi",
         "git -C \"$repo\" rev-parse --git-dir >/dev/null",
-        "registered=$(git -C \"$repo\" worktree list --porcelain | awk '/^worktree / {print substr($0, 10)}' | grep -Fx \"$workspace\" || true)",
+        "if ! worktrees=$(git -C \"$repo\" worktree list --porcelain); then",
+        "  echo \"workspace_worktree_list_failed: $repo\"",
+        "  exit 43",
+        "fi",
+        "registered=$(printf '%s\\n' \"$worktrees\" | awk '/^worktree / {print substr($0, 10)}' | grep -Fx \"$workspace\" || true)",
         "if [ -n \"$registered\" ]; then",
         "  git -C \"$repo\" worktree remove --force \"$workspace\"",
         "elif [ -e \"$workspace\" ]; then",
@@ -736,7 +744,11 @@ defmodule SymphonyElixir.Workspace do
         |> Enum.map(&String.replace_prefix(&1, "worktree ", ""))
         |> Enum.any?(&(Path.expand(&1) == workspace))
 
-      {:error, _reason, _output} ->
+      {:error, reason, output} ->
+        sanitized_output = sanitize_hook_output_for_log(output)
+
+        Logger.warning("Git worktree list failed repo=#{repo} workspace=#{workspace} reason=#{inspect(reason)} output=#{inspect(sanitized_output)}")
+
         false
     end
   end

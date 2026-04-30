@@ -897,6 +897,8 @@ Workspace persistence:
 - Successful runs do not auto-delete workspaces.
 - With `workspace.strategy == worktree`, cleanup removes the registered worktree with
   `git worktree remove --force` and deletes Symphony's `auto/<issue.identifier>` branch.
+  Forced worktree removal also deletes the working directory on disk, including any
+  uncommitted changes inside that worktree.
 
 ### 9.2 Workspace Creation and Reuse
 
