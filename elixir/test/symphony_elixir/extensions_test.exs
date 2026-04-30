@@ -351,6 +351,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "worker_host" => nil,
                  "workspace_path" => nil,
                  "session_id" => "thread-http",
+                 "transcript_path" => nil,
                  "turn_count" => 7,
                  "last_event" => "notification",
                  "last_message" => "rendered",
@@ -380,6 +381,27 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "workspace_path" => nil
                }
              ],
+             "run_history" => [
+               %{
+                 "run_id" => "run-http",
+                 "issue_id" => "issue-http",
+                 "issue_identifier" => "MT-HTTP",
+                 "title" => "HTTP snapshot",
+                 "state" => "In Progress",
+                 "status" => "success",
+                 "attempt" => 1,
+                 "started_at" => state_payload["run_history"] |> List.first() |> Map.fetch!("started_at"),
+                 "ended_at" => state_payload["run_history"] |> List.first() |> Map.fetch!("ended_at"),
+                 "error" => nil,
+                 "worker_host" => nil,
+                 "workspace_path" => nil,
+                 "session_id" => "thread-http",
+                 "transcript_path" => nil,
+                 "turn_count" => 7,
+                 "runtime_seconds" => 42,
+                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+               }
+             ],
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -405,6 +427,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "worker_host" => nil,
                "workspace_path" => nil,
                "session_id" => "thread-http",
+               "transcript_path" => nil,
                "turn_count" => 7,
                "state" => "In Progress",
                "started_at" => issue_payload["running"]["started_at"],
@@ -424,6 +447,29 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
              json_response(conn, 200)
+
+    conn = get(build_conn(), "/api/v1/MT-WATCH")
+    watching_payload = json_response(conn, 200)
+
+    assert watching_payload == %{
+             "issue_identifier" => "MT-WATCH",
+             "issue_id" => "issue-watch",
+             "status" => "watching",
+             "workspace" => nil,
+             "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
+             "running" => nil,
+             "retry" => nil,
+             "watching" => %{
+               "state" => "In Review",
+               "url" => "https://linear.app/a8c/issue/MT-WATCH",
+               "last_ran_at" => state_payload["watching"] |> List.first() |> Map.fetch!("last_ran_at"),
+               "seconds_since_last_run" => 3_600
+             },
+             "logs" => %{"codex_session_logs" => []},
+             "recent_events" => [],
+             "last_error" => nil,
+             "tracked" => %{}
+           }
 
     conn = get(build_conn(), "/api/v1/MT-MISSING")
 
@@ -731,6 +777,27 @@ defmodule SymphonyElixir.ExtensionsTest do
           attempt: 2,
           due_in_ms: 2_000,
           error: "boom"
+        }
+      ],
+      run_history: [
+        %{
+          run_id: "run-http",
+          issue_id: "issue-http",
+          issue_identifier: "MT-HTTP",
+          title: "HTTP snapshot",
+          state: "In Progress",
+          status: "success",
+          attempt: 1,
+          started_at: DateTime.utc_now(),
+          ended_at: DateTime.utc_now(),
+          error: nil,
+          worker_host: nil,
+          workspace_path: nil,
+          session_id: "thread-http",
+          transcript_path: nil,
+          turn_count: 7,
+          runtime_seconds: 42,
+          tokens: %{input_tokens: 4, output_tokens: 8, total_tokens: 12}
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

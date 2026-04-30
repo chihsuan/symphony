@@ -15,6 +15,7 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Linear.Issue
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
+      alias SymphonyElixir.RunStore
       alias SymphonyElixir.StatusDashboard
       alias SymphonyElixir.Tracker
       alias SymphonyElixir.Workflow
@@ -36,6 +37,7 @@ defmodule SymphonyElixir.TestSupport do
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        if Process.whereis(SymphonyElixir.RunStore), do: SymphonyElixir.RunStore.clear()
         stop_default_http_server()
 
         on_exit(fn ->
@@ -119,6 +121,7 @@ defmodule SymphonyElixir.TestSupport do
           hook_after_run: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
+          routing: nil,
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -156,6 +159,7 @@ defmodule SymphonyElixir.TestSupport do
     hook_after_run = Keyword.get(config, :hook_after_run)
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
+    routing = Keyword.get(config, :routing)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -193,6 +197,7 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        routing_yaml(routing),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -239,6 +244,9 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
+
+  defp routing_yaml(nil), do: nil
+  defp routing_yaml(routes), do: "routing: #{yaml_value(routes)}"
 
   defp worker_yaml(ssh_hosts, max_concurrent_agents_per_host)
        when ssh_hosts in [nil, []] and is_nil(max_concurrent_agents_per_host),

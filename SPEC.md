@@ -254,8 +254,11 @@ Fields:
 - `identifier` (best-effort human ID for status surfaces/logs)
 - `attempt` (integer, 1-based for retry queue)
 - `due_at_ms` (monotonic clock timestamp)
+- `due_at` (wall-clock timestamp for durable persistence and restart hydration)
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)
+- `worker_host` (string or null)
+- `workspace_path` (string or null)
 
 #### 4.1.8 Orchestrator Runtime State
 
@@ -271,6 +274,22 @@ Fields:
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `codex_totals` (aggregate tokens + runtime seconds)
 - `codex_rate_limits` (latest rate-limit snapshot from agent events)
+
+#### 4.1.9 Durable Run Store
+
+Implementations MAY persist orchestrator records outside the live GenServer state. When present,
+the durable store SHOULD record:
+
+- per-run status (`running`, `success`, `failure`, `timeout`, or implementation-defined stopped
+  states)
+- issue ID, identifier, title, tracker state, attempt number, start/end time, error
+- workspace path, worker host, session ID, transcript path when available
+- per-run token totals and runtime seconds
+- retry queue rows with issue ID, attempt, due time, error, worker host, and workspace path
+- aggregate token/runtime totals
+
+Live scheduler state still owns dispatch decisions. Durable records are used for restart recovery
+and observability, not as a second concurrent scheduler.
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -331,6 +350,7 @@ Top-level keys:
 - `polling`
 - `workspace`
 - `hooks`
+- `routing`
 - `agent`
 - `codex`
 
@@ -405,7 +425,42 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.3.5 `routing` (list of objects)
+
+Optional ordered label-based hook overrides for multi-repository projects.
+
+Each entry fields:
+
+- `requires_label` (string, REQUIRED)
+  - Compared against normalized issue labels after trimming and lowercasing.
+  - Entries are checked in list order. The first matching entry wins.
+- `hooks` (object, OPTIONAL)
+  - Same fields as top-level `hooks`.
+  - Values present here override top-level hook values for the matched issue.
+  - Omitted hook fields fall back to top-level `hooks`.
+
+Fallback behavior:
+
+- If `routing` is omitted or no entry matches the issue labels, the runtime uses top-level `hooks`.
+- Existing workflows without `routing` MUST continue to behave unchanged.
+
+Example:
+
+```yaml
+routing:
+  - requires_label: js
+    hooks:
+      after_create: |
+        git clone git@github.com:your-org/js-package.git .
+        pnpm install
+  - requires_label: php
+    hooks:
+      after_create: |
+        git clone git@github.com:your-org/php-plugin.git .
+        composer install
+```
+
+#### 5.3.6 `agent` (object)
 
 Fields:
 
@@ -424,7 +479,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.3.7 `codex` (object)
 
 Fields:
 
@@ -583,6 +638,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
+- `routing`: ordered list of label-based hook override entries, default `[]`
+- `routing[].requires_label`: string label selector, REQUIRED for each entry
+- `routing[].hooks`: hook overrides merged over top-level `hooks`
 - `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
@@ -835,10 +893,17 @@ Algorithm summary:
 3. Ensure the workspace path exists as a directory.
 4. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
-5. If `created_now=true`, run `after_create` hook if configured.
+5. Select effective hooks for the issue:
+   - Use the first `routing` entry whose `requires_label` matches an issue label, if any.
+   - Merge matched route hook values over top-level `hooks`.
+   - Use top-level `hooks` when no route matches.
+6. If `created_now=true`, run the effective `after_create` hook if configured.
 
 Notes:
 
+- `before_run`, `after_run`, and `before_remove` use the same effective hook selection
+  as `after_create`, so a matched route applies consistently to every workspace lifecycle
+  hook execution point.
 - This section does not assume any specific repository/VCS workflow.
 - Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
   code generation) is implementation-defined and is typically handled via hooks.
@@ -1283,6 +1348,7 @@ SHOULD return:
 - `watching` (list of recently completed issues now in non-active, non-terminal states)
 - each watching row SHOULD include issue identifier, current state, issue URL, and last-run time
 - `retrying` (list of retry queue rows)
+- `run_history` (recent durable run records, if a durable store is enabled)
 - `codex_totals`
   - `input_tokens`
   - `output_tokens`
@@ -1436,6 +1502,24 @@ Minimum endpoints:
           "seconds_since_last_run": 7230
         }
       ],
+      "run_history": [
+        {
+          "run_id": "abc123-1771963830000000-1",
+          "issue_id": "abc123",
+          "issue_identifier": "MT-649",
+          "status": "success",
+          "attempt": 1,
+          "started_at": "2026-02-24T20:10:12Z",
+          "ended_at": "2026-02-24T20:14:59Z",
+          "session_id": "thread-1-turn-1",
+          "workspace_path": "/tmp/symphony_workspaces/MT-649",
+          "tokens": {
+            "input_tokens": 1200,
+            "output_tokens": 800,
+            "total_tokens": 2000
+          }
+        }
+      ],
       "codex_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
@@ -1449,6 +1533,9 @@ Minimum endpoints:
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information
     the implementation tracks that is useful for debugging.
+  - Issues in the `watching` list SHOULD resolve here with `status: "watching"` and a lightweight
+    `watching` object containing `state`, `url`, and `last_ran_at`; they do not have active session
+    fields.
   - Suggested response shape:
 
     ```json
@@ -1585,17 +1672,20 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+Scheduler decisions remain owned by the live orchestrator process, but implementations MAY persist
+retry queue rows, run history, session metadata, and aggregate totals in a durable store.
+Restart recovery means the service can resume useful operation by polling tracker state, reusing
+preserved workspaces, and rehydrating persisted retry queue entries. It does not mean live worker
+processes survive process restart.
 
 After restart:
 
-- No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
+- Retry timers SHOULD be re-created from durable retry queue rows when a durable store is enabled.
+- Previously running sessions are not assumed recoverable; they SHOULD remain visible in run history
+  and MAY be marked failed/interrupted.
 - Service recovers by:
   - startup terminal workspace cleanup
+  - durable retry queue hydration
   - fresh polling of active issues
   - re-dispatching eligible work
 
@@ -1756,12 +1846,13 @@ on_tick(state):
 ```text
 function reconcile_watching_issues(state):
   issue_ids = keys(state.completed_run_metadata) union keys(state.watching)
+  issue_ids = issue_ids excluding keys(state.retry_attempts)
   if issue_ids is empty:
     return state
 
   refreshed = tracker.fetch_issue_states_by_ids(issue_ids)
   if refreshed failed:
-    log_debug("keep watched issues")
+    log_warning("keep watched issues")
     return state
 
   for issue in refreshed:
@@ -1769,16 +1860,16 @@ function reconcile_watching_issues(state):
       state.completed.remove(issue.id)
       state.completed_run_metadata.remove(issue.id)
       state.watching.remove(issue.id)
-    else if issue.state not in active_states:
-      metadata = state.completed_run_metadata[issue.id]
-      state.watching[issue.id] = {
-        identifier: issue.identifier,
-        state: issue.state,
-        url: issue.url,
-        last_ran_at: metadata.last_ran_at
-      }
-    else:
+    else if issue.state in active_states:
       state.watching.remove(issue.id)
+    else if issue.state not in active_states:
+      metadata = state.completed_run_metadata[issue.id] or state.watching[issue.id] or {}
+      state.watching[issue.id] = {
+        identifier: issue.identifier or metadata.identifier or issue.id,
+        state: issue.state,
+        url: issue.url or metadata.url,
+        last_ran_at: metadata.last_ran_at or now_utc()
+      }
 
   remove missing issue IDs from completed_run_metadata and watching
   return state
@@ -1969,11 +2060,12 @@ on_retry_timer(issue_id, state):
 
   if issue.state not in active_states:
     state.claimed.remove(issue_id)
+    metadata = state.completed_run_metadata[issue_id] or state.watching[issue_id] or {}
     state.watching[issue_id] = {
-      identifier: issue.identifier,
+      identifier: issue.identifier or metadata.identifier or issue_id,
       state: issue.state,
-      url: issue.url,
-      last_ran_at: state.completed_run_metadata[issue_id].last_ran_at
+      url: issue.url or metadata.url,
+      last_ran_at: metadata.last_ran_at or now_utc()
     }
     return state
 
@@ -2152,6 +2244,7 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
+- Label-based workflow routing for issue-specific workspace hook overrides
 - Coding-agent app-server subprocess client with JSON line protocol
 - Codex launch command config (`codex.command`, default `codex app-server`)
 - Strict prompt rendering with `issue` and `attempt` variables
@@ -2168,7 +2261,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
-- TODO: Persist retry queue and session metadata across process restarts.
+- Durable run store extension persists retry queue rows, run history, session metadata, and aggregate
+  totals across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead

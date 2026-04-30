@@ -371,6 +371,106 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
+  test "linear client filters candidate pickup by configured assignee" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "user-1")
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:candidate_query, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-1",
+                 "identifier" => "MT-1",
+                 "title" => "Assigned here",
+                 "state" => %{"name" => "Todo"},
+                 "assignee" => %{"id" => "user-1"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               },
+               %{
+                 "id" => "issue-2",
+                 "identifier" => "MT-2",
+                 "title" => "Assigned elsewhere",
+                 "state" => %{"name" => "Todo"},
+                 "assignee" => %{"id" => "user-2"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               },
+               %{
+                 "id" => "issue-3",
+                 "identifier" => "MT-3",
+                 "title" => "Unassigned",
+                 "state" => %{"name" => "Todo"},
+                 "assignee" => nil,
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, issues} = Client.fetch_candidate_issues_for_test(graphql_fun)
+
+    assert Enum.map(issues, & &1.identifier) == ["MT-1"]
+    assert Enum.all?(issues, & &1.assigned_to_worker)
+
+    assert_receive {:candidate_query, query,
+                    %{
+                      projectSlug: "project",
+                      stateNames: ["Todo", "In Progress"],
+                      first: 50,
+                      relationFirst: 50
+                    }}
+
+    assert query =~ "SymphonyLinearPoll"
+  end
+
+  test "linear client resolves assignee me before filtering candidate pickup" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "me")
+
+    graphql_fun = fn query, _variables ->
+      if query =~ "SymphonyLinearViewer" do
+        {:ok, %{"data" => %{"viewer" => %{"id" => "user-2"}}}}
+      else
+        {:ok,
+         %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [
+                 %{
+                   "id" => "issue-1",
+                   "identifier" => "MT-1",
+                   "title" => "Assigned elsewhere",
+                   "state" => %{"name" => "Todo"},
+                   "assignee" => %{"id" => "user-1"}
+                 },
+                 %{
+                   "id" => "issue-2",
+                   "identifier" => "MT-2",
+                   "title" => "Assigned to viewer",
+                   "state" => %{"name" => "Todo"},
+                   "assignee" => %{"id" => "user-2"}
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }}
+      end
+    end
+
+    assert {:ok, issues} = Client.fetch_candidate_issues_for_test(graphql_fun)
+
+    assert Enum.map(issues, & &1.identifier) == ["MT-2"]
+  end
+
   test "linear client pagination merge helper preserves issue ordering" do
     issue_page_1 = [
       %Issue{id: "issue-1", identifier: "MT-1"},
@@ -627,6 +727,191 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS")
       assert File.read!(before_remove_marker) == "before_remove\n"
       refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace after_create hook uses first matching workflow routing entry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-routing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo fallback > route.txt",
+        routing: [
+          %{
+            requires_label: "JS",
+            hooks: %{after_create: "echo js > route.txt"}
+          },
+          %{
+            requires_label: "php",
+            hooks: %{after_create: "echo php > route.txt"}
+          }
+        ]
+      )
+
+      js_issue = %Issue{
+        id: "issue-js",
+        identifier: "MT-ROUTE-JS",
+        title: "JS work",
+        state: "Todo",
+        labels: ["php", "js"]
+      }
+
+      assert {:ok, js_workspace} = Workspace.create_for_issue(js_issue)
+      assert File.read!(Path.join(js_workspace, "route.txt")) == "js\n"
+
+      fallback_issue = %Issue{
+        id: "issue-docs",
+        identifier: "MT-ROUTE-DOCS",
+        title: "Docs work",
+        state: "Todo",
+        labels: ["docs"]
+      }
+
+      assert {:ok, fallback_workspace} = Workspace.create_for_issue(fallback_issue)
+      assert File.read!(Path.join(fallback_workspace, "route.txt")) == "fallback\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workflow routing hook overrides merge over top-level hooks" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-routing-merge-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      top_remove_marker = Path.join(test_root, "top-remove.txt")
+      route_remove_marker = Path.join(test_root, "route-remove.txt")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo fallback > route.txt",
+        hook_before_run: "echo top-before > before.txt",
+        hook_before_remove: "echo top-remove > \"#{top_remove_marker}\"",
+        hook_timeout_ms: 120_000,
+        routing: [
+          %{
+            requires_label: "js",
+            hooks: %{
+              after_create: "echo js > route.txt",
+              before_remove: "echo route-remove > \"#{route_remove_marker}\"",
+              timeout_ms: 5_000
+            }
+          }
+        ]
+      )
+
+      issue = %Issue{
+        id: "issue-js-merge",
+        identifier: "MT-ROUTE-MERGE",
+        title: "JS work",
+        state: "Todo",
+        labels: ["js"]
+      }
+
+      effective_hooks = Config.hooks_for_issue(issue)
+      assert effective_hooks.after_create == "echo js > route.txt"
+      assert String.trim(effective_hooks.before_run) == "echo top-before > before.txt"
+      assert effective_hooks.before_remove == "echo route-remove > \"#{route_remove_marker}\""
+      assert effective_hooks.timeout_ms == 5_000
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "route.txt")) == "js\n"
+
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+      assert File.read!(Path.join(workspace, "before.txt")) == "top-before\n"
+
+      assert :ok = Workspace.remove_issue_workspaces(issue)
+      assert File.read!(route_remove_marker) == "route-remove\n"
+      refute File.exists?(top_remove_marker)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workflow routing supports label inputs and routes without hook overrides" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      hook_after_create: "echo fallback > route.txt",
+      hook_before_run: "echo top-before > before.txt",
+      routing: [
+        %{requires_label: "docs"}
+      ]
+    )
+
+    settings = Config.settings!()
+
+    assert Config.hooks_for_issue(["docs", nil, :api]) == settings.hooks
+    assert Config.hooks_for_issue(%{"labels" => ["docs"]}) == settings.hooks
+    assert Config.hooks_for_issue(%{"labels" => "docs"}) == settings.hooks
+  end
+
+  test "workflow routing rejects duplicate normalized labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      routing: [
+        %{requires_label: "JS"},
+        %{requires_label: " js "}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "routing"
+    assert message =~ "requires_label values must be unique"
+  end
+
+  test "workflow routing rejects blank labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      routing: [
+        %{requires_label: ""}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "routing"
+    assert message =~ "requires_label"
+    assert message =~ "can't be blank"
+  end
+
+  test "workspace cleanup logs removal failures while keeping fire-and-forget API" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-remove-log-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      outside_workspace = Path.join(test_root, "outside")
+
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(outside_workspace)
+      File.write!(Path.join(outside_workspace, "marker.txt"), "keep\n")
+      File.ln_s!(outside_workspace, Path.join(workspace_root, "MT-ESCAPE"))
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      log =
+        capture_log(fn ->
+          assert :ok = Workspace.remove_issue_workspaces("MT-ESCAPE")
+        end)
+
+      assert log =~ "Workspace removal failed"
+      assert log =~ "issue_identifier=MT-ESCAPE"
+      assert log =~ "workspace_outside_root"
+      assert File.exists?(Path.join(outside_workspace, "marker.txt"))
     after
       File.rm_rf(test_root)
     end

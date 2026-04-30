@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, RunStore, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -54,6 +54,9 @@ defmodule SymphonyElixir.Orchestrator do
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
+    :ok = ensure_run_store_started()
+    {retry_attempts, claimed} = hydrate_retry_attempts()
+    codex_totals = persisted_codex_totals()
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -62,10 +65,13 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
-      codex_totals: @empty_codex_totals,
+      claimed: claimed,
+      retry_attempts: retry_attempts,
+      codex_totals: codex_totals,
       codex_rate_limits: nil
     }
 
+    mark_interrupted_runs()
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
 
@@ -131,9 +137,12 @@ defmodule SymphonyElixir.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
+        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+
         state =
           case reason do
             :normal ->
+              persist_run_completion(running_entry, "success", nil)
               Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
               state
@@ -146,19 +155,19 @@ defmodule SymphonyElixir.Orchestrator do
               })
 
             _ ->
+              error = "agent exited: #{inspect(reason)}"
+              persist_run_completion(running_entry, terminal_status_for_reason(reason), error)
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
+                error: error,
                 worker_host: Map.get(running_entry, :worker_host),
                 workspace_path: Map.get(running_entry, :workspace_path)
               })
           end
-
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
         notify_dashboard()
         {:noreply, state}
@@ -177,6 +186,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
+        persist_running_entry(updated_running_entry)
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -198,6 +208,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
 
+        persist_running_entry(updated_running_entry)
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -396,7 +407,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> reconcile_missing_watching_issue_ids(issue_ids, issues)
 
         {:error, reason} ->
-          Logger.debug("Failed to refresh watching issue states: #{inspect(reason)}; keeping watched issues")
+          Logger.warning("Failed to refresh watching issue states: #{inspect(reason)}; keeping watched issues")
           state
       end
     end
@@ -509,6 +520,13 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         state = maybe_track_completed_run(state, issue_id, running_entry, cleanup_workspace, opts)
+
+        persist_run_completion(
+          running_entry,
+          Keyword.get(opts, :status, "stopped"),
+          Keyword.get(opts, :error, "agent stopped by orchestrator")
+        )
+
         worker_host = Map.get(running_entry, :worker_host)
 
         if cleanup_workspace do
@@ -529,6 +547,7 @@ defmodule SymphonyElixir.Orchestrator do
             claimed: MapSet.delete(state.claimed, issue_id),
             retry_attempts: Map.delete(state.retry_attempts, issue_id)
         }
+        |> delete_persisted_retry(issue_id)
 
       _ ->
         release_issue_claim(state, issue_id)
@@ -566,7 +585,10 @@ defmodule SymphonyElixir.Orchestrator do
       next_attempt = next_retry_attempt_from_running(running_entry)
 
       state
-      |> terminate_running_issue(issue_id, false)
+      |> terminate_running_issue(issue_id, false,
+        status: "timeout",
+        error: "stalled for #{elapsed_ms}ms without codex activity"
+      )
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
         error: "stalled for #{elapsed_ms}ms without codex activity"
@@ -795,32 +817,40 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+        started_at = DateTime.utc_now()
+        run_id = new_run_id(issue.id)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            worker_host: worker_host,
-            workspace_path: nil,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_count: 0,
-            retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
-          })
+        running_entry = %{
+          pid: pid,
+          ref: ref,
+          run_id: run_id,
+          identifier: issue.identifier,
+          issue: issue,
+          worker_host: worker_host,
+          workspace_path: nil,
+          session_id: nil,
+          transcript_path: nil,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          turn_count: 0,
+          retry_attempt: normalize_retry_attempt(attempt),
+          started_at: started_at
+        }
+
+        persist_run_start(issue, running_entry, attempt)
+        delete_persisted_retry(issue.id)
+
+        running = Map.put(state.running, issue.id, running_entry)
 
         %{
           state
@@ -863,6 +893,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id, running_entry) do
+    delete_persisted_retry(issue_id)
     state = remember_completed_run(state, issue_id, running_entry)
 
     %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}
@@ -874,8 +905,6 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
-    retry_token = make_ref()
-    due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
@@ -885,8 +914,20 @@ defmodule SymphonyElixir.Orchestrator do
       Process.cancel_timer(old_timer)
     end
 
-    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+    persist_retry(%{
+      issue_id: issue_id,
+      identifier: identifier,
+      attempt: next_attempt,
+      due_at: DateTime.add(DateTime.utc_now(), delay_ms, :millisecond),
+      error: error,
+      worker_host: worker_host,
+      workspace_path: workspace_path,
+      updated_at: DateTime.utc_now()
+    })
 
+    retry_token = make_ref()
+    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+    due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
@@ -917,6 +958,7 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(retry_entry, :workspace_path)
         }
 
+        delete_persisted_retry(issue_id)
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
 
       _ ->
@@ -951,7 +993,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
+        cleanup_issue_workspace(issue, metadata[:worker_host])
         {:noreply, state |> forget_completed_issue(issue_id) |> release_issue_claim(issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -978,6 +1020,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
 
+  defp cleanup_issue_workspace(%Issue{} = issue, worker_host) do
+    Workspace.remove_issue_workspaces(issue, worker_host)
+  end
+
   defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier, worker_host)
   end
@@ -989,8 +1035,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, issues} ->
         issues
         |> Enum.each(fn
-          %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
+          %Issue{} = issue ->
+            cleanup_issue_workspace(issue)
 
           _ ->
             :ok
@@ -1027,6 +1073,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
+    delete_persisted_retry(issue_id)
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
@@ -1171,6 +1218,259 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp ensure_run_store_started do
+    case RunStore.ensure_started() do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Run store unavailable; continuing without durable state reason=#{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp persisted_codex_totals do
+    case RunStore.get_codex_totals() do
+      %{} = totals ->
+        Map.merge(@empty_codex_totals, totals)
+
+      nil ->
+        @empty_codex_totals
+
+      {:error, reason} ->
+        Logger.warning("Failed to read persisted codex totals: #{inspect(reason)}")
+        @empty_codex_totals
+    end
+  end
+
+  defp hydrate_retry_attempts do
+    case RunStore.list_retries() do
+      retries when is_list(retries) ->
+        now = DateTime.utc_now()
+        now_ms = System.monotonic_time(:millisecond)
+
+        Enum.reduce(retries, {%{}, MapSet.new()}, fn retry, {retry_attempts, claimed} ->
+          hydrate_retry_attempt(retry, retry_attempts, claimed, now, now_ms)
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Failed to hydrate retry queue from run store: #{inspect(reason)}")
+        {%{}, MapSet.new()}
+    end
+  end
+
+  defp hydrate_retry_attempt(%{issue_id: issue_id} = retry, retry_attempts, claimed, now, now_ms)
+       when is_binary(issue_id) do
+    delay_ms = retry_due_delay_ms(Map.get(retry, :due_at), now)
+    retry_token = make_ref()
+    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+    attempt = retry_attempt(Map.get(retry, :attempt))
+
+    retry_entry = %{
+      attempt: attempt,
+      timer_ref: timer_ref,
+      retry_token: retry_token,
+      due_at_ms: now_ms + delay_ms,
+      identifier: Map.get(retry, :identifier) || issue_id,
+      error: Map.get(retry, :error),
+      worker_host: Map.get(retry, :worker_host),
+      workspace_path: Map.get(retry, :workspace_path)
+    }
+
+    {Map.put(retry_attempts, issue_id, retry_entry), MapSet.put(claimed, issue_id)}
+  end
+
+  defp hydrate_retry_attempt(_retry, retry_attempts, claimed, _now, _now_ms), do: {retry_attempts, claimed}
+
+  defp retry_due_delay_ms(%DateTime{} = due_at, %DateTime{} = now) do
+    max(0, DateTime.diff(due_at, now, :millisecond))
+  end
+
+  defp retry_due_delay_ms(_due_at, _now), do: 0
+
+  defp retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
+  defp retry_attempt(_attempt), do: 1
+
+  defp mark_interrupted_runs do
+    case RunStore.interrupt_running_runs("orchestrator restarted before worker exit") do
+      {:ok, 0} ->
+        :ok
+
+      {:ok, count} ->
+        Logger.warning("Marked #{count} previously running agent run(s) as failed after orchestrator startup")
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to mark interrupted runs in run store: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp persisted_run_history do
+    case RunStore.list_runs(50) do
+      runs when is_list(runs) ->
+        runs
+
+      {:error, reason} ->
+        Logger.warning("Failed to read persisted run history: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp persist_run_start(%Issue{} = issue, running_entry, attempt) when is_map(running_entry) do
+    issue
+    |> run_record(running_entry, "running", attempt_count(attempt))
+    |> RunStore.put_run()
+    |> log_run_store_error("persist run start")
+  end
+
+  defp persist_running_entry(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :run_id) do
+      run_id when is_binary(run_id) ->
+        running_entry
+        |> run_update_from_entry()
+        |> then(&RunStore.update_run(run_id, &1))
+        |> ignore_missing_run()
+        |> log_run_store_error("persist running metadata")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp persist_running_entry(_running_entry), do: :ok
+
+  defp persist_run_completion(running_entry, status, error) when is_map(running_entry) and is_binary(status) do
+    case Map.get(running_entry, :run_id) do
+      run_id when is_binary(run_id) ->
+        now = DateTime.utc_now()
+
+        attrs =
+          running_entry
+          |> run_update_from_entry()
+          |> Map.merge(%{
+            status: status,
+            ended_at: now,
+            error: error,
+            runtime_seconds: running_seconds(Map.get(running_entry, :started_at), now),
+            updated_at: now
+          })
+
+        run_id
+        |> RunStore.update_run(attrs)
+        |> ignore_missing_run()
+        |> log_run_store_error("persist run completion")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp persist_run_completion(_running_entry, _status, _error), do: :ok
+
+  defp persist_retry(retry) when is_map(retry) do
+    retry
+    |> RunStore.put_retry()
+    |> log_run_store_error("persist retry")
+  end
+
+  defp persist_codex_totals(totals) when is_map(totals) do
+    totals
+    |> RunStore.put_codex_totals()
+    |> log_run_store_error("persist codex totals")
+  end
+
+  defp delete_persisted_retry(issue_id) when is_binary(issue_id) do
+    issue_id
+    |> RunStore.delete_retry()
+    |> log_run_store_error("delete retry")
+  end
+
+  defp delete_persisted_retry(_issue_id), do: :ok
+
+  defp delete_persisted_retry(%State{} = state, issue_id) do
+    delete_persisted_retry(issue_id)
+    state
+  end
+
+  defp run_record(%Issue{} = issue, running_entry, status, attempt_count) do
+    now = DateTime.utc_now()
+    started_at = Map.get(running_entry, :started_at) || now
+
+    %{
+      run_id: Map.fetch!(running_entry, :run_id),
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      status: status,
+      attempt: attempt_count,
+      started_at: started_at,
+      ended_at: nil,
+      error: nil,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      session_id: Map.get(running_entry, :session_id),
+      transcript_path: Map.get(running_entry, :transcript_path),
+      codex_app_server_pid: Map.get(running_entry, :codex_app_server_pid),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      tokens: run_tokens(running_entry),
+      runtime_seconds: 0,
+      last_event: Map.get(running_entry, :last_codex_event),
+      last_event_at: Map.get(running_entry, :last_codex_timestamp),
+      updated_at: now
+    }
+  end
+
+  defp run_update_from_entry(running_entry) when is_map(running_entry) do
+    %{
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path),
+      session_id: Map.get(running_entry, :session_id),
+      transcript_path: Map.get(running_entry, :transcript_path),
+      codex_app_server_pid: Map.get(running_entry, :codex_app_server_pid),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      tokens: run_tokens(running_entry),
+      runtime_seconds: running_seconds(Map.get(running_entry, :started_at), DateTime.utc_now()),
+      last_event: Map.get(running_entry, :last_codex_event),
+      last_event_at: Map.get(running_entry, :last_codex_timestamp),
+      updated_at: DateTime.utc_now()
+    }
+  end
+
+  defp run_tokens(running_entry) when is_map(running_entry) do
+    %{
+      input_tokens: Map.get(running_entry, :codex_input_tokens, 0),
+      output_tokens: Map.get(running_entry, :codex_output_tokens, 0),
+      total_tokens: Map.get(running_entry, :codex_total_tokens, 0)
+    }
+  end
+
+  defp new_run_id(issue_id) when is_binary(issue_id) do
+    "#{issue_id}-#{System.system_time(:microsecond)}-#{System.unique_integer([:positive])}"
+  end
+
+  defp new_run_id(_issue_id) do
+    "run-#{System.system_time(:microsecond)}-#{System.unique_integer([:positive])}"
+  end
+
+  defp attempt_count(attempt) when is_integer(attempt) and attempt > 0, do: attempt
+  defp attempt_count(_attempt), do: 1
+
+  defp terminal_status_for_reason(:timeout), do: "timeout"
+  defp terminal_status_for_reason({:timeout, _reason}), do: "timeout"
+  defp terminal_status_for_reason(_reason), do: "failure"
+
+  defp ignore_missing_run({:error, :run_not_found}), do: :ok
+  defp ignore_missing_run(other), do: other
+
+  defp log_run_store_error(:ok, _action), do: :ok
+
+  defp log_run_store_error({:error, reason}, action) do
+    Logger.warning("Failed to #{action}: #{inspect(reason)}")
+    :ok
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1217,11 +1517,12 @@ defmodule SymphonyElixir.Orchestrator do
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
-          session_id: metadata.session_id,
-          codex_app_server_pid: metadata.codex_app_server_pid,
-          codex_input_tokens: metadata.codex_input_tokens,
-          codex_output_tokens: metadata.codex_output_tokens,
-          codex_total_tokens: metadata.codex_total_tokens,
+          session_id: Map.get(metadata, :session_id),
+          transcript_path: Map.get(metadata, :transcript_path),
+          codex_app_server_pid: Map.get(metadata, :codex_app_server_pid),
+          codex_input_tokens: Map.get(metadata, :codex_input_tokens, 0),
+          codex_output_tokens: Map.get(metadata, :codex_output_tokens, 0),
+          codex_total_tokens: Map.get(metadata, :codex_total_tokens, 0),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1265,6 +1566,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        watching: watching,
        retrying: retrying,
+       run_history: persisted_run_history(),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1296,6 +1598,7 @@ defmodule SymphonyElixir.Orchestrator do
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
     codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     codex_app_server_pid = Map.get(running_entry, :codex_app_server_pid)
+    transcript_path = Map.get(running_entry, :transcript_path)
     last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
@@ -1305,7 +1608,8 @@ defmodule SymphonyElixir.Orchestrator do
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
-        session_id: session_id_for_update(running_entry.session_id, update),
+        session_id: session_id_for_update(Map.get(running_entry, :session_id), update),
+        transcript_path: transcript_path_for_update(transcript_path, update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
@@ -1314,7 +1618,7 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, Map.get(running_entry, :session_id), update)
       }),
       token_delta
     }
@@ -1337,6 +1641,17 @@ defmodule SymphonyElixir.Orchestrator do
     do: session_id
 
   defp session_id_for_update(existing, _update), do: existing
+
+  defp transcript_path_for_update(_existing, %{transcript_path: transcript_path})
+       when is_binary(transcript_path),
+       do: transcript_path
+
+  defp transcript_path_for_update(existing, update) when is_map(update) do
+    case Map.get(update, "transcript_path") || Map.get(update, :transcriptPath) || Map.get(update, "transcriptPath") do
+      transcript_path when is_binary(transcript_path) -> transcript_path
+      _ -> existing
+    end
+  end
 
   defp turn_count_for_update(existing_count, existing_session_id, %{
          event: :session_started,
@@ -1486,6 +1801,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
       )
 
+    persist_codex_totals(codex_totals)
     %{state | codex_totals: codex_totals}
   end
 
@@ -1515,7 +1831,9 @@ defmodule SymphonyElixir.Orchestrator do
          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
        )
        when is_integer(input) and is_integer(output) and is_integer(total) do
-    %{state | codex_totals: apply_token_delta(codex_totals, token_delta)}
+    codex_totals = apply_token_delta(codex_totals, token_delta)
+    persist_codex_totals(codex_totals)
+    %{state | codex_totals: codex_totals}
   end
 
   defp apply_codex_token_delta(state, _token_delta), do: state

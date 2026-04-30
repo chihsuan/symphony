@@ -205,6 +205,8 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
+    @type t :: %__MODULE__{}
+
     embedded_schema do
       field(:after_create, :string)
       field(:before_run, :string)
@@ -218,6 +220,56 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(attrs, [:after_create, :before_run, :after_run, :before_remove, :timeout_ms], empty_values: [])
       |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
+  defmodule HookOverrides do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @type t :: %__MODULE__{}
+
+    embedded_schema do
+      field(:after_create, :string)
+      field(:before_run, :string)
+      field(:after_run, :string)
+      field(:before_remove, :string)
+      field(:timeout_ms, :integer)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:after_create, :before_run, :after_run, :before_remove, :timeout_ms], empty_values: [])
+      |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
+  defmodule Routing do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+    alias SymphonyElixir.Config.Schema.HookOverrides
+
+    @primary_key false
+    @type t :: %__MODULE__{}
+
+    embedded_schema do
+      field(:requires_label, :string)
+      embeds_one(:hooks, HookOverrides, on_replace: :update)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:requires_label], empty_values: [])
+      |> update_change(:requires_label, &Schema.normalize_issue_label/1)
+      |> validate_required([:requires_label])
+      |> cast_embed(:hooks, with: &HookOverrides.changeset/2)
     end
   end
 
@@ -269,6 +321,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_many(:routing, Routing, on_replace: :delete)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
@@ -308,7 +361,7 @@ defmodule SymphonyElixir.Config.Schema do
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
       %{} = policy ->
-        {:ok, policy}
+        resolve_explicit_runtime_turn_sandbox_policy(policy, workspace, settings.workspace.root, opts)
 
       _ ->
         workspace
@@ -320,6 +373,31 @@ defmodule SymphonyElixir.Config.Schema do
   @spec normalize_issue_state(String.t()) :: String.t()
   def normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(state_name)
+  end
+
+  @spec normalize_issue_label(term()) :: String.t()
+  def normalize_issue_label(label) when is_binary(label) do
+    label
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  def normalize_issue_label(nil), do: ""
+  def normalize_issue_label(label), do: label |> to_string() |> normalize_issue_label()
+
+  @spec hooks_for_issue(%__MODULE__{}, term()) :: Hooks.t()
+  def hooks_for_issue(%__MODULE__{} = settings, issue_or_labels) do
+    issue_labels =
+      issue_or_labels
+      |> extract_issue_labels()
+      |> normalized_issue_label_set()
+
+    (settings.routing || [])
+    |> Enum.find(&route_matches_issue_labels?(&1, issue_labels))
+    |> case do
+      nil -> settings.hooks
+      %Routing{} = route -> merge_hook_overrides(settings.hooks, route.hooks)
+    end
   end
 
   @doc false
@@ -361,6 +439,8 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:routing, with: &Routing.changeset/2)
+    |> validate_unique_routing_labels()
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
@@ -394,6 +474,68 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
+
+  defp validate_unique_routing_labels(changeset) do
+    duplicate_labels =
+      changeset
+      |> get_change(:routing, [])
+      |> Enum.flat_map(fn route_changeset ->
+        case get_field(route_changeset, :requires_label) do
+          label when is_binary(label) and label != "" -> [label]
+          _label -> []
+        end
+      end)
+      |> duplicate_values()
+
+    case duplicate_labels do
+      [] -> changeset
+      _duplicates -> add_error(changeset, :routing, "requires_label values must be unique")
+    end
+  end
+
+  defp duplicate_values(values) do
+    {_seen, duplicates} =
+      Enum.reduce(values, {MapSet.new(), MapSet.new()}, fn value, {seen, duplicates} ->
+        case MapSet.member?(seen, value) do
+          true -> {seen, MapSet.put(duplicates, value)}
+          false -> {MapSet.put(seen, value), duplicates}
+        end
+      end)
+
+    MapSet.to_list(duplicates)
+  end
+
+  defp extract_issue_labels(labels) when is_list(labels), do: labels
+  defp extract_issue_labels(%{labels: labels}) when is_list(labels), do: labels
+  defp extract_issue_labels(%{"labels" => labels}) when is_list(labels), do: labels
+  defp extract_issue_labels(_issue_or_labels), do: []
+
+  defp normalized_issue_label_set(labels) when is_list(labels) do
+    labels
+    |> Enum.map(&normalize_issue_label/1)
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
+  end
+
+  defp route_matches_issue_labels?(%Routing{requires_label: label}, issue_labels) do
+    MapSet.member?(issue_labels, label)
+  end
+
+  defp merge_hook_overrides(%Hooks{} = hooks, nil), do: hooks
+
+  defp merge_hook_overrides(%Hooks{} = hooks, %HookOverrides{} = overrides) do
+    %Hooks{
+      hooks
+      | after_create: hook_override(overrides.after_create, hooks.after_create),
+        before_run: hook_override(overrides.before_run, hooks.before_run),
+        after_run: hook_override(overrides.after_run, hooks.after_run),
+        before_remove: hook_override(overrides.before_remove, hooks.before_remove),
+        timeout_ms: hook_override(overrides.timeout_ms, hooks.timeout_ms)
+    }
+  end
+
+  defp hook_override(nil, fallback), do: fallback
+  defp hook_override(value, _fallback), do: value
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
@@ -505,6 +647,28 @@ defmodule SymphonyElixir.Config.Schema do
     {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
   end
 
+  defp resolve_explicit_runtime_turn_sandbox_policy(policy, workspace, fallback_workspace, opts) do
+    case default_runtime_policy_override?(policy) do
+      true ->
+        workspace
+        |> default_workspace_root(fallback_workspace)
+        |> merge_default_runtime_turn_sandbox_policy(policy, opts)
+
+      false ->
+        {:ok, policy}
+    end
+  end
+
+  defp merge_default_runtime_turn_sandbox_policy(workspace_root, policy, opts) do
+    with {:ok, default_policy} <- default_runtime_turn_sandbox_policy(workspace_root, opts) do
+      {:ok, Map.merge(default_policy, policy)}
+    end
+  end
+
+  defp default_runtime_policy_override?(policy) when is_map(policy) do
+    not Map.has_key?(policy, "writableRoots") and Map.get(policy, "type", "workspaceWrite") == "workspaceWrite"
+  end
+
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
     do: workspace
 
@@ -543,7 +707,10 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp flatten_errors(errors, prefix) when is_list(errors) do
-    Enum.map(errors, &(prefix <> " " <> &1))
+    Enum.flat_map(errors, fn
+      error when is_binary(error) -> [prefix <> " " <> error]
+      nested -> flatten_errors(nested, prefix)
+    end)
   end
 
   defp translate_error({message, options}) do

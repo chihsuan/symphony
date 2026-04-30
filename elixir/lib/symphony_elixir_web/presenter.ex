@@ -21,6 +21,7 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           watching: snapshot |> Map.get(:watching, []) |> Enum.map(&watching_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
+          run_history: Enum.map(Map.get(snapshot, :run_history, []), &run_history_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
         }
@@ -39,11 +40,12 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
         retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
+        watching = snapshot |> Map.get(:watching, []) |> Enum.find(&(&1.identifier == issue_identifier))
 
-        if is_nil(running) and is_nil(retry) do
+        if is_nil(running) and is_nil(retry) and is_nil(watching) do
           {:error, :issue_not_found}
         else
-          {:ok, issue_payload_body(issue_identifier, running, retry)}
+          {:ok, issue_payload_body(issue_identifier, running, retry, watching)}
         end
 
       _ ->
@@ -62,15 +64,12 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry) do
-    %{
+  defp issue_payload_body(issue_identifier, running, retry, watching) do
+    payload = %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry),
-      status: issue_status(running, retry),
-      workspace: %{
-        path: workspace_path(issue_identifier, running, retry),
-        host: workspace_host(running, retry)
-      },
+      issue_id: issue_id_from_entries(running, retry, watching),
+      status: issue_status(running, retry, watching),
+      workspace: workspace_payload(issue_identifier, running, retry),
       attempts: %{
         restart_count: restart_count(retry),
         current_retry_attempt: retry_attempt(retry)
@@ -84,18 +83,28 @@ defmodule SymphonyElixirWeb.Presenter do
       last_error: retry && retry.error,
       tracked: %{}
     }
+
+    if watching do
+      Map.put(payload, :watching, watching_issue_payload(watching))
+    else
+      payload
+    end
   end
 
-  defp issue_id_from_entries(running, retry),
-    do: (running && running.issue_id) || (retry && retry.issue_id)
+  defp issue_id_from_entries(running, retry, watching),
+    do: (running && running.issue_id) || (retry && retry.issue_id) || (watching && watching.issue_id)
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(_running, nil), do: "running"
-  defp issue_status(nil, _retry), do: "retrying"
-  defp issue_status(_running, _retry), do: "running"
+  defp issue_status(running, retry, _watching) do
+    cond do
+      running -> "running"
+      retry -> "retrying"
+      true -> "watching"
+    end
+  end
 
   defp running_entry_payload(entry) do
     %{
@@ -105,6 +114,7 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
+      transcript_path: Map.get(entry, :transcript_path),
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
@@ -146,6 +156,7 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(running, :worker_host),
       workspace_path: Map.get(running, :workspace_path),
       session_id: running.session_id,
+      transcript_path: Map.get(running, :transcript_path),
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),
@@ -168,6 +179,46 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(retry, :worker_host),
       workspace_path: Map.get(retry, :workspace_path)
     }
+  end
+
+  defp watching_issue_payload(watching) do
+    %{
+      state: watching.state,
+      url: watching.url,
+      last_ran_at: iso8601(watching.last_ran_at),
+      seconds_since_last_run: watching.seconds_since_last_run
+    }
+  end
+
+  defp run_history_payload(entry) do
+    %{
+      run_id: entry.run_id,
+      issue_id: entry.issue_id,
+      issue_identifier: entry.issue_identifier,
+      title: Map.get(entry, :title),
+      state: Map.get(entry, :state),
+      status: entry.status,
+      attempt: entry.attempt,
+      started_at: iso8601(entry.started_at),
+      ended_at: iso8601(Map.get(entry, :ended_at)),
+      error: Map.get(entry, :error),
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path),
+      session_id: Map.get(entry, :session_id),
+      transcript_path: Map.get(entry, :transcript_path),
+      turn_count: Map.get(entry, :turn_count, 0),
+      runtime_seconds: Map.get(entry, :runtime_seconds, 0),
+      tokens: Map.get(entry, :tokens, %{})
+    }
+  end
+
+  defp workspace_payload(issue_identifier, running, retry) do
+    if running || retry do
+      %{
+        path: workspace_path(issue_identifier, running, retry),
+        host: workspace_host(running, retry)
+      }
+    end
   end
 
   defp workspace_path(issue_identifier, running, retry) do
