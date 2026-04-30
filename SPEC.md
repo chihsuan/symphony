@@ -254,8 +254,11 @@ Fields:
 - `identifier` (best-effort human ID for status surfaces/logs)
 - `attempt` (integer, 1-based for retry queue)
 - `due_at_ms` (monotonic clock timestamp)
+- `due_at` (wall-clock timestamp for durable persistence and restart hydration)
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)
+- `worker_host` (string or null)
+- `workspace_path` (string or null)
 
 #### 4.1.8 Orchestrator Runtime State
 
@@ -271,6 +274,22 @@ Fields:
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `codex_totals` (aggregate tokens + runtime seconds)
 - `codex_rate_limits` (latest rate-limit snapshot from agent events)
+
+#### 4.1.9 Durable Run Store
+
+Implementations MAY persist orchestrator records outside the live GenServer state. When present,
+the durable store SHOULD record:
+
+- per-run status (`running`, `success`, `failure`, `timeout`, or implementation-defined stopped
+  states)
+- issue ID, identifier, title, tracker state, attempt number, start/end time, error
+- workspace path, worker host, session ID, transcript path when available
+- per-run token totals and runtime seconds
+- retry queue rows with issue ID, attempt, due time, error, worker host, and workspace path
+- aggregate token/runtime totals
+
+Live scheduler state still owns dispatch decisions. Durable records are used for restart recovery
+and observability, not as a second concurrent scheduler.
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -1327,6 +1346,7 @@ SHOULD return:
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
+- `run_history` (recent durable run records, if a durable store is enabled)
 - `codex_totals`
   - `input_tokens`
   - `output_tokens`
@@ -1467,6 +1487,24 @@ Minimum endpoints:
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
           "error": "no available orchestrator slots"
+        }
+      ],
+      "run_history": [
+        {
+          "run_id": "abc123-1771963830000000-1",
+          "issue_id": "abc123",
+          "issue_identifier": "MT-649",
+          "status": "success",
+          "attempt": 1,
+          "started_at": "2026-02-24T20:10:12Z",
+          "ended_at": "2026-02-24T20:14:59Z",
+          "session_id": "thread-1-turn-1",
+          "workspace_path": "/tmp/symphony_workspaces/MT-649",
+          "tokens": {
+            "input_tokens": 1200,
+            "output_tokens": 800,
+            "total_tokens": 2000
+          }
         }
       ],
       "codex_totals": {
@@ -1618,17 +1656,20 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+Scheduler decisions remain owned by the live orchestrator process, but implementations MAY persist
+retry queue rows, run history, session metadata, and aggregate totals in a durable store.
+Restart recovery means the service can resume useful operation by polling tracker state, reusing
+preserved workspaces, and rehydrating persisted retry queue entries. It does not mean live worker
+processes survive process restart.
 
 After restart:
 
-- No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
+- Retry timers SHOULD be re-created from durable retry queue rows when a durable store is enabled.
+- Previously running sessions are not assumed recoverable; they SHOULD remain visible in run history
+  and MAY be marked failed/interrupted.
 - Service recovers by:
   - startup terminal workspace cleanup
+  - durable retry queue hydration
   - fresh polling of active issues
   - re-dispatching eligible work
 
@@ -2139,7 +2180,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
-- TODO: Persist retry queue and session metadata across process restarts.
+- Durable run store extension persists retry queue rows, run history, session metadata, and aggregate
+  totals across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead

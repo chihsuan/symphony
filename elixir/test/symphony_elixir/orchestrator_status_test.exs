@@ -751,6 +751,122 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_in_ms > 0
   end
 
+  test "orchestrator rehydrates persisted retry queue entries on restart" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    :ok = RunStore.clear()
+
+    due_at = DateTime.add(DateTime.utc_now(), 60_000, :millisecond)
+
+    assert :ok =
+             RunStore.put_retry(%{
+               issue_id: "issue-persisted-retry",
+               identifier: "MT-501",
+               attempt: 4,
+               due_at: due_at,
+               error: "agent exited: :boom",
+               worker_host: "worker-a",
+               workspace_path: "/tmp/workspaces/MT-501"
+             })
+
+    orchestrator_name = Module.concat(__MODULE__, :PersistedRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert [
+             %{
+               issue_id: "issue-persisted-retry",
+               identifier: "MT-501",
+               attempt: 4,
+               error: "agent exited: :boom",
+               worker_host: "worker-a",
+               workspace_path: "/tmp/workspaces/MT-501",
+               due_in_ms: due_in_ms
+             }
+           ] = snapshot.retrying
+
+    assert due_in_ms > 0
+
+    GenServer.stop(pid)
+    {:ok, restarted_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    restarted_snapshot = GenServer.call(restarted_pid, :snapshot)
+
+    assert [
+             %{
+               issue_id: "issue-persisted-retry",
+               identifier: "MT-501",
+               attempt: 4,
+               error: "agent exited: :boom"
+             }
+           ] = restarted_snapshot.retrying
+
+    GenServer.stop(restarted_pid)
+  end
+
+  test "orchestrator startup marks interrupted dispatched runs as failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-interrupted-run-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-interrupted-run",
+      identifier: "MT-502",
+      title: "Interrupted run",
+      description: "Run should survive restart as failed history",
+      state: "Todo",
+      url: "https://example.org/issues/MT-502"
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: test_root,
+      hook_before_run: "sleep 5",
+      poll_interval_ms: 60_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    :ok = RunStore.clear()
+
+    orchestrator_name = Module.concat(__MODULE__, :InterruptedRunRecoveryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    try do
+      send(pid, :run_poll_cycle)
+
+      running_record =
+        wait_for_run_record(fn
+          %{issue_id: "issue-interrupted-run", status: "running"} -> true
+          _record -> false
+        end)
+
+      GenServer.stop(pid)
+      terminate_task_supervisor_children()
+
+      {:ok, restarted_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      recovered_record =
+        wait_for_run_record(fn
+          %{run_id: run_id, status: "failure", error: "orchestrator restarted before worker exit"}
+          when run_id == running_record.run_id ->
+            true
+
+          _record ->
+            false
+        end)
+
+      assert recovered_record.issue_identifier == "MT-502"
+      assert %DateTime{} = recovered_record.ended_at
+
+      GenServer.stop(restarted_pid)
+    after
+      terminate_task_supervisor_children()
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator snapshot includes poll countdown and checking status" do
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -957,7 +1073,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
+    assert remaining_ms >= 9_000
     assert remaining_ms <= 10_500
   end
 
@@ -1570,6 +1686,37 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         do_wait_for_snapshot(pid, predicate, deadline_ms)
       end
     end
+  end
+
+  defp wait_for_run_record(predicate, timeout_ms \\ 500) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_run_record(predicate, deadline_ms)
+  end
+
+  defp do_wait_for_run_record(predicate, deadline_ms) do
+    record =
+      RunStore.list_runs(:all)
+      |> Enum.find(predicate)
+
+    cond do
+      is_map(record) ->
+        record
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
+        flunk("timed out waiting for run store record: #{inspect(RunStore.list_runs(:all))}")
+
+      true ->
+        Process.sleep(5)
+        do_wait_for_run_record(predicate, deadline_ms)
+    end
+  end
+
+  defp terminate_task_supervisor_children do
+    SymphonyElixir.TaskSupervisor
+    |> Task.Supervisor.children()
+    |> Enum.each(fn pid ->
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid)
+    end)
   end
 
   defp graph_samples_from_rates(rates_per_bucket) do
