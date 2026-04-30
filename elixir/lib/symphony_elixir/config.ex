@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  require Logger
+
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
 
@@ -135,6 +137,68 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       true ->
+        validate_workspace_semantics(settings)
+    end
+  end
+
+  defp validate_workspace_semantics(%Schema{workspace: %{strategy: "worktree"} = workspace, worker: worker}) do
+    cond do
+      not is_binary(workspace.repo) or String.trim(workspace.repo) == "" ->
+        {:error, {:invalid_workflow_config, "workspace.repo is required when workspace.strategy is worktree"}}
+
+      worker.ssh_hosts != [] ->
+        :ok
+
+      true ->
+        workspace.repo
+        |> Path.expand()
+        |> validate_local_worktree_repo()
+    end
+  end
+
+  defp validate_workspace_semantics(_settings), do: :ok
+
+  defp validate_local_worktree_repo(repo) when is_binary(repo) do
+    with :ok <- validate_local_worktree_repo_path(repo),
+         :ok <- validate_local_worktree_git_repo(repo) do
+      warn_if_local_worktree_repo_dirty(repo)
+      :ok
+    end
+  end
+
+  defp validate_local_worktree_repo_path(repo) do
+    cond do
+      not File.exists?(repo) ->
+        {:error, {:invalid_workflow_config, "workspace.repo does not exist: #{repo}"}}
+
+      not File.dir?(repo) ->
+        {:error, {:invalid_workflow_config, "workspace.repo is not a directory: #{repo}"}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_local_worktree_git_repo(repo) do
+    case System.cmd("git", ["-C", repo, "rev-parse", "--git-dir"], stderr_to_stdout: true) do
+      {_output, 0} ->
+        :ok
+
+      {output, status} ->
+        {:error, {:invalid_workflow_config, "workspace.repo is not a valid git repository: #{repo} (git rev-parse exited #{status}: #{String.trim(output)})"}}
+    end
+  end
+
+  defp warn_if_local_worktree_repo_dirty(repo) do
+    case System.cmd("git", ["-C", repo, "status", "--porcelain"], stderr_to_stdout: true) do
+      {"", 0} ->
+        :ok
+
+      {output, 0} ->
+        Logger.warning("Worktree primary clone has uncommitted changes workspace_repo=#{repo} dirty=#{inspect(String.trim(output))}")
+        :ok
+
+      {_output, _status} ->
         :ok
     end
   end

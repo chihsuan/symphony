@@ -135,6 +135,13 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
+- Set `workspace.strategy: worktree` to create each issue workspace from an existing local primary
+  clone instead of cloning in `hooks.after_create`. Configure `workspace.repo` with that primary
+  clone path; Symphony creates `auto/<issue-identifier>` branches with `git worktree add`, fetches
+  `origin` before dispatch by default, and removes worktree workspaces with `git worktree remove
+  --force` during cleanup.
+- With SSH workers, `workspace.root` and `workspace.repo` are both interpreted on the worker host.
+  Each worker host needs its own primary clone; Symphony surfaces a workspace error if it is missing.
 - Use `routing` to override workspace hooks for issues with specific Linear labels. Entries are
   checked in order; the first `requires_label` that matches an issue label wins. Hook fields omitted
   from a matching route fall back to the top-level `hooks` values, and issues without a matching
@@ -147,18 +154,20 @@ Notes:
   active issues in the configured project are eligible. `tracker.assignee` reads from
   `LINEAR_ASSIGNEE` when unset or when value is `$LINEAR_ASSIGNEE`.
 - For path values, `~` is expanded to the home directory.
-- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell.
+- For env-backed path values, use `$VAR`. `workspace.root` and `workspace.repo` resolve `$VAR`
+  before path handling, while `codex.command` stays a shell command string and any `$VAR` expansion
+  there happens in the launched shell.
 
 ```yaml
 tracker:
   api_key: $LINEAR_API_KEY
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+  strategy: worktree
+  repo: $SOURCE_REPO_PATH
 hooks:
   after_create: |
-    git clone --depth 1 "$SOURCE_REPO_URL" .
+    mix deps.get
 codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```

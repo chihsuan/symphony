@@ -18,6 +18,9 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/Projects/symphony-workspaces
+  # strategy: worktree
+  # repo: ~/Projects/symphony
+  # fetch_before_dispatch: true
 hooks:
   after_create: |
     git clone --depth 1 git@github.com:chihsuan/symphony.git .

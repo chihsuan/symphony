@@ -101,6 +101,9 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+          workspace_strategy: "clone",
+          workspace_repo: nil,
+          workspace_fetch_before_dispatch: true,
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
@@ -139,6 +142,9 @@ defmodule SymphonyElixir.TestSupport do
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    workspace_strategy = Keyword.get(config, :workspace_strategy)
+    workspace_repo = Keyword.get(config, :workspace_repo)
+    workspace_fetch_before_dispatch = Keyword.get(config, :workspace_fetch_before_dispatch)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
@@ -180,6 +186,9 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        "  strategy: #{yaml_value(workspace_strategy)}",
+        "  repo: #{yaml_value(workspace_repo)}",
+        "  fetch_before_dispatch: #{yaml_value(workspace_fetch_before_dispatch)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
