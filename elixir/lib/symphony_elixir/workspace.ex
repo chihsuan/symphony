@@ -20,7 +20,7 @@ defmodule SymphonyElixir.Workspace do
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
-           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
+           {:ok, workspace, created?} <- ensure_workspace(workspace, issue_context, worker_host),
            :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
         {:ok, workspace}
       end
@@ -31,7 +31,17 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_workspace(workspace, nil) do
+  defp ensure_workspace(workspace, issue_context, worker_host) do
+    case Config.settings!().workspace.strategy do
+      "worktree" ->
+        ensure_worktree_workspace(workspace, issue_context, worker_host)
+
+      _strategy ->
+        ensure_directory_workspace(workspace, worker_host)
+    end
+  end
+
+  defp ensure_directory_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
         {:ok, workspace, false}
@@ -45,7 +55,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_workspace(workspace, worker_host) when is_binary(worker_host) do
+  defp ensure_directory_workspace(workspace, worker_host) when is_binary(worker_host) do
     script =
       [
         "set -eu",
@@ -78,10 +88,128 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  defp ensure_worktree_workspace(workspace, issue_context, nil) do
+    with {:ok, repo} <- local_worktree_repo(),
+         :ok <- maybe_fetch_worktree_repo(repo),
+         {:ok, created?} <- add_or_reuse_local_worktree(repo, workspace, worktree_branch(issue_context)) do
+      {:ok, workspace, created?}
+    end
+  end
+
+  defp ensure_worktree_workspace(workspace, issue_context, worker_host) when is_binary(worker_host) do
+    settings = Config.settings!()
+    branch = worktree_branch(issue_context)
+
+    script =
+      [
+        "set -eu",
+        remote_shell_assign("repo", settings.workspace.repo || ""),
+        remote_shell_assign("workspace", workspace),
+        "branch=#{shell_escape(branch)}",
+        "if [ -z \"$repo\" ]; then",
+        "  echo \"workspace_repo_missing: workspace.repo is required for worktree strategy\"",
+        "  exit 41",
+        "fi",
+        "if [ ! -d \"$repo\" ]; then",
+        "  echo \"workspace_repo_missing: $repo\"",
+        "  exit 41",
+        "fi",
+        "git -C \"$repo\" rev-parse --git-dir >/dev/null",
+        settings.workspace.fetch_before_dispatch && "git -C \"$repo\" fetch origin",
+        "if [ -d \"$workspace\" ]; then",
+        "  if ! worktrees=$(git -C \"$repo\" worktree list --porcelain); then",
+        "    echo \"workspace_worktree_list_failed: $repo\"",
+        "    exit 43",
+        "  fi",
+        "  registered=$(printf '%s\\n' \"$worktrees\" | awk '/^worktree / {print substr($0, 10)}' | grep -Fx \"$workspace\" || true)",
+        "  if [ -z \"$registered\" ]; then",
+        "    echo \"workspace_not_registered_worktree: $workspace\"",
+        "    exit 42",
+        "  fi",
+        "  created=0",
+        "elif [ -e \"$workspace\" ]; then",
+        "  rm -rf \"$workspace\"",
+        "  #{remote_worktree_add_command()}",
+        "  created=1",
+        "else",
+        "  #{remote_worktree_add_command()}",
+        "  created=1",
+        "fi",
+        "cd \"$workspace\"",
+        "printf '%s\\t%s\\t%s\\n' '#{@remote_workspace_marker}' \"$created\" \"$(pwd -P)\""
+      ]
+      |> Enum.reject(&(&1 in ["", nil, false]))
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, settings.hooks.timeout_ms) do
+      {:ok, {output, 0}} ->
+        parse_remote_workspace_output(output)
+
+      {:ok, {output, status}} ->
+        {:error, {:workspace_prepare_failed, worker_host, status, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp create_workspace(workspace) do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, workspace, true}
+  end
+
+  defp local_worktree_repo do
+    repo = Config.settings!().workspace.repo
+
+    if is_binary(repo) and String.trim(repo) != "" do
+      {:ok, Path.expand(repo)}
+    else
+      {:error, :missing_workspace_repo}
+    end
+  end
+
+  defp maybe_fetch_worktree_repo(repo) do
+    case Config.settings!().workspace.fetch_before_dispatch do
+      true -> run_git(repo, ["fetch", "origin"])
+      false -> :ok
+    end
+  end
+
+  defp add_or_reuse_local_worktree(repo, workspace, branch) do
+    cond do
+      File.dir?(workspace) ->
+        case registered_worktree?(repo, workspace) do
+          true -> {:ok, false}
+          false -> {:error, {:workspace_not_registered_worktree, workspace}}
+        end
+
+      File.exists?(workspace) ->
+        File.rm_rf!(workspace)
+        add_local_worktree(repo, workspace, branch)
+
+      true ->
+        add_local_worktree(repo, workspace, branch)
+    end
+  end
+
+  defp add_local_worktree(repo, workspace, branch) do
+    File.mkdir_p!(Path.dirname(workspace))
+
+    with :ok <- run_git(repo, worktree_add_args(repo, workspace, branch)) do
+      {:ok, true}
+    end
+  end
+
+  defp worktree_add_args(repo, workspace, branch) do
+    case git_branch_exists?(repo, branch) do
+      true -> ["worktree", "add", workspace, branch]
+      false -> ["worktree", "add", "-b", branch, workspace, "HEAD"]
+    end
+  end
+
+  defp remote_worktree_add_command do
+    "if git -C \"$repo\" rev-parse --verify \"refs/heads/$branch\" >/dev/null 2>&1; then git -C \"$repo\" worktree add \"$workspace\" \"$branch\"; else git -C \"$repo\" worktree add -b \"$branch\" \"$workspace\" HEAD; fi"
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -101,6 +229,22 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp remove_workspace(workspace, issue_context, nil) do
+    if Config.settings!().workspace.strategy == "worktree" do
+      remove_worktree_workspace(workspace, issue_context, nil)
+    else
+      remove_directory_workspace(workspace, issue_context, nil)
+    end
+  end
+
+  defp remove_workspace(workspace, issue_context, worker_host) when is_binary(worker_host) do
+    if Config.settings!().workspace.strategy == "worktree" do
+      remove_worktree_workspace(workspace, issue_context, worker_host)
+    else
+      remove_directory_workspace(workspace, issue_context, worker_host)
+    end
+  end
+
+  defp remove_directory_workspace(workspace, issue_context, nil) do
     case File.exists?(workspace) do
       true ->
         case validate_workspace_path(workspace, nil) do
@@ -117,7 +261,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp remove_workspace(workspace, issue_context, worker_host) when is_binary(worker_host) do
+  defp remove_directory_workspace(workspace, issue_context, worker_host) when is_binary(worker_host) do
     maybe_run_before_remove_hook(workspace, issue_context, worker_host)
 
     script =
@@ -128,6 +272,67 @@ defmodule SymphonyElixir.Workspace do
       |> Enum.join("\n")
 
     case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} ->
+        {:ok, []}
+
+      {:ok, {output, status}} ->
+        {:error, {:workspace_remove_failed, worker_host, status, output}, ""}
+
+      {:error, reason} ->
+        {:error, reason, ""}
+    end
+  end
+
+  defp remove_worktree_workspace(workspace, issue_context, nil) do
+    with {:ok, repo} <- local_worktree_repo(),
+         :ok <- validate_workspace_path(workspace, nil),
+         :ok <- remove_local_worktree(repo, workspace, issue_context) do
+      {:ok, [workspace]}
+    else
+      {:error, reason, output} -> {:error, reason, output}
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
+
+  defp remove_worktree_workspace(workspace, issue_context, worker_host) when is_binary(worker_host) do
+    settings = Config.settings!()
+    branch = worktree_branch(issue_context)
+
+    maybe_run_before_remove_hook(workspace, issue_context, worker_host)
+
+    script =
+      [
+        "set -eu",
+        remote_shell_assign("repo", settings.workspace.repo || ""),
+        remote_shell_assign("workspace", workspace),
+        "branch=#{shell_escape(branch)}",
+        "if [ -z \"$repo\" ]; then",
+        "  echo \"workspace_repo_missing: workspace.repo is required for worktree strategy\"",
+        "  exit 41",
+        "fi",
+        "if [ ! -d \"$repo\" ]; then",
+        "  echo \"workspace_repo_missing: $repo\"",
+        "  exit 41",
+        "fi",
+        "git -C \"$repo\" rev-parse --git-dir >/dev/null",
+        "if ! worktrees=$(git -C \"$repo\" worktree list --porcelain); then",
+        "  echo \"workspace_worktree_list_failed: $repo\"",
+        "  exit 43",
+        "fi",
+        "registered=$(printf '%s\\n' \"$worktrees\" | awk '/^worktree / {print substr($0, 10)}' | grep -Fx \"$workspace\" || true)",
+        "if [ -n \"$registered\" ]; then",
+        "  git -C \"$repo\" worktree remove --force \"$workspace\"",
+        "elif [ -e \"$workspace\" ]; then",
+        "  echo \"workspace_not_registered_worktree: $workspace\"",
+        "  exit 42",
+        "fi",
+        "if git -C \"$repo\" rev-parse --verify \"refs/heads/$branch\" >/dev/null 2>&1; then",
+        "  git -C \"$repo\" branch -D \"$branch\"",
+        "fi"
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, settings.hooks.timeout_ms) do
       {:ok, {_output, 0}} ->
         {:ok, []}
 
@@ -260,6 +465,12 @@ defmodule SymphonyElixir.Workspace do
   defp safe_identifier(identifier) do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
   end
+
+  defp worktree_branch(%{issue_identifier: identifier}) when is_binary(identifier) and identifier != "" do
+    "auto/#{identifier}"
+  end
+
+  defp worktree_branch(_issue_context), do: "auto/issue"
 
   defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
     hooks = Config.hooks_for_issue(issue_context)
@@ -495,6 +706,74 @@ defmodule SymphonyElixir.Workspace do
 
       _ ->
         {:error, {:workspace_prepare_failed, :invalid_output, output}}
+    end
+  end
+
+  defp remove_local_worktree(repo, workspace, issue_context) do
+    cond do
+      registered_worktree?(repo, workspace) ->
+        maybe_run_before_remove_hook(workspace, issue_context, nil)
+
+        with :ok <- run_git(repo, ["worktree", "remove", "--force", workspace]) do
+          delete_local_worktree_branch(repo, worktree_branch(issue_context))
+        end
+
+      File.exists?(workspace) ->
+        {:error, {:workspace_not_registered_worktree, workspace}, ""}
+
+      true ->
+        delete_local_worktree_branch(repo, worktree_branch(issue_context))
+    end
+  end
+
+  defp delete_local_worktree_branch(repo, branch) do
+    case git_branch_exists?(repo, branch) do
+      true -> run_git(repo, ["branch", "-D", branch])
+      false -> :ok
+    end
+  end
+
+  defp registered_worktree?(repo, workspace) do
+    workspace = Path.expand(workspace)
+
+    case git_output(repo, ["worktree", "list", "--porcelain"]) do
+      {:ok, output} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&String.starts_with?(&1, "worktree "))
+        |> Enum.map(&String.replace_prefix(&1, "worktree ", ""))
+        |> Enum.any?(&(Path.expand(&1) == workspace))
+
+      {:error, reason, output} ->
+        sanitized_output = sanitize_hook_output_for_log(output)
+
+        Logger.warning("Git worktree list failed repo=#{repo} workspace=#{workspace} reason=#{inspect(reason)} output=#{inspect(sanitized_output)}")
+
+        false
+    end
+  end
+
+  defp git_branch_exists?(repo, branch) do
+    case System.cmd("git", ["-C", repo, "rev-parse", "--verify", "refs/heads/#{branch}"], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      {_output, _status} -> false
+    end
+  end
+
+  defp run_git(repo, args) when is_binary(repo) and is_list(args) do
+    case git_output(repo, args) do
+      {:ok, _output} -> :ok
+      {:error, reason, output} -> {:error, reason, output}
+    end
+  end
+
+  defp git_output(repo, args) when is_binary(repo) and is_list(args) do
+    case System.cmd("git", ["-C", repo | args], stderr_to_stdout: true) do
+      {output, 0} ->
+        {:ok, output}
+
+      {output, status} ->
+        {:error, {:git_failed, repo, args, status}, output}
     end
   end
 
