@@ -1,24 +1,24 @@
 ```text
 ╭─ SYMPHONY STATUS
-│ Agents: 2/10
-│ Throughput: 1,842 tps
-│ Runtime: 72m 1s
-│ Tokens: in 250,000 | out 18,500 | total 268,500
-│ Rate Limits: gpt-5 | primary 12,345/20,000 reset 30s | secondary 45/60 reset 12s | credits 9876.50
+│ Agents: 0/10
+│ Throughput: 0 tps
+│ Runtime: 45m 0s
+│ Tokens: in 18,000 | out 2,200 | total 20,200
+│ Rate Limits: unavailable
 │ Project: https://linear.app/project/project/issues
 │ Next refresh: n/a
 ├─ Running
 │
 │   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-101   running        4242     13m 5s / 11     120,450 thre...567890  turn completed (completed)
-│ ● MT-102   running        5252     6m 52s / 4       89,200 thre...567890  mix test --cover
+│  No active agents
 │
 ├─ Watching
 │
 │   ID       STATE          LAST RUN     LINEAR URL
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-│  No watched issues
+│ ◌ MT-902   Human Review   45m ago      https://linear.app/a8c/issue/MT-902
+│ ◌ MT-901   In Review      2h ago       https://linear.app/a8c/issue/MT-901
 │
 ├─ Backoff queue
 │

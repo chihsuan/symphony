@@ -15,9 +15,11 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           counts: %{
             running: length(snapshot.running),
+            watching: length(Map.get(snapshot, :watching, [])),
             retrying: length(snapshot.retrying)
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
+          watching: snapshot |> Map.get(:watching, []) |> Enum.map(&watching_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
@@ -113,6 +115,17 @@ defmodule SymphonyElixirWeb.Presenter do
         output_tokens: entry.codex_output_tokens,
         total_tokens: entry.codex_total_tokens
       }
+    }
+  end
+
+  defp watching_entry_payload(entry) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      state: entry.state,
+      url: entry.url,
+      last_ran_at: iso8601(entry.last_ran_at),
+      seconds_since_last_run: entry.seconds_since_last_run
     }
   end
 

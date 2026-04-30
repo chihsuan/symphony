@@ -138,6 +138,33 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("backoff_queue", render_snapshot(snapshot_data, 15.4))
   end
 
+  test "snapshot fixture: watching issues" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         watching: [
+           watching_entry(%{
+             identifier: "MT-901",
+             state: "In Review",
+             seconds_since_last_run: 7_200,
+             url: "https://linear.app/a8c/issue/MT-901"
+           }),
+           watching_entry(%{
+             identifier: "MT-902",
+             state: "Human Review",
+             seconds_since_last_run: 2_700,
+             url: "https://linear.app/a8c/issue/MT-902"
+           })
+         ],
+         retrying: [],
+         codex_totals: %{input_tokens: 18_000, output_tokens: 2_200, total_tokens: 20_200, seconds_running: 2_700},
+         rate_limits: nil
+       }}
+
+    Snapshot.assert_dashboard_snapshot!("watching_issues", render_snapshot(snapshot_data, 0.0))
+  end
+
   test "backoff queue row escapes escaped newline sequences" do
     snapshot_data =
       {:ok,
@@ -223,6 +250,19 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
         attempt: 1,
         due_in_ms: 1_000,
         error: "retry scheduled"
+      },
+      overrides
+    )
+  end
+
+  defp watching_entry(overrides) do
+    Map.merge(
+      %{
+        issue_id: "issue-watch",
+        identifier: "MT-000",
+        state: "In Review",
+        seconds_since_last_run: 60,
+        url: "https://linear.app/a8c/issue/MT-000"
       },
       overrides
     )

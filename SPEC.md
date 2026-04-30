@@ -1280,6 +1280,8 @@ SHOULD return:
 
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
+- `watching` (list of recently completed issues now in non-active, non-terminal states)
+- each watching row SHOULD include issue identifier, current state, issue URL, and last-run time
 - `retrying` (list of retry queue rows)
 - `codex_totals`
   - `input_tokens`
@@ -1394,6 +1396,7 @@ Minimum endpoints:
       "generated_at": "2026-02-24T20:15:30Z",
       "counts": {
         "running": 2,
+        "watching": 1,
         "retrying": 1
       },
       "running": [
@@ -1421,6 +1424,16 @@ Minimum endpoints:
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
           "error": "no available orchestrator slots"
+        }
+      ],
+      "watching": [
+        {
+          "issue_id": "ghi789",
+          "issue_identifier": "MT-651",
+          "state": "In Review",
+          "url": "https://linear.app/example/issue/MT-651",
+          "last_ran_at": "2026-02-24T18:15:00Z",
+          "seconds_since_last_run": 7230
         }
       ],
       "codex_totals": {
@@ -1690,6 +1703,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
+    completed_run_metadata: {},
+    watching: {},
     codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
     codex_rate_limits: null
   }
@@ -1710,6 +1725,7 @@ function start_service():
 ```text
 on_tick(state):
   state = reconcile_running_issues(state)
+  state = reconcile_watching_issues(state)
 
   validation = validate_dispatch_config()
   if validation is not ok:
@@ -1737,6 +1753,37 @@ on_tick(state):
   return state
 ```
 
+```text
+function reconcile_watching_issues(state):
+  issue_ids = keys(state.completed_run_metadata) union keys(state.watching)
+  if issue_ids is empty:
+    return state
+
+  refreshed = tracker.fetch_issue_states_by_ids(issue_ids)
+  if refreshed failed:
+    log_debug("keep watched issues")
+    return state
+
+  for issue in refreshed:
+    if issue.state in terminal_states:
+      state.completed.remove(issue.id)
+      state.completed_run_metadata.remove(issue.id)
+      state.watching.remove(issue.id)
+    else if issue.state not in active_states:
+      metadata = state.completed_run_metadata[issue.id]
+      state.watching[issue.id] = {
+        identifier: issue.identifier,
+        state: issue.state,
+        url: issue.url,
+        last_ran_at: metadata.last_ran_at
+      }
+    else:
+      state.watching.remove(issue.id)
+
+  remove missing issue IDs from completed_run_metadata and watching
+  return state
+```
+
 ### 16.3 Reconcile Active Runs
 
 ```text
@@ -1758,6 +1805,8 @@ function reconcile_running_issues(state):
     else if issue.state in active_states:
       state.running[issue.id].issue = issue
     else:
+      state.completed.add(issue.id)
+      state.completed_run_metadata[issue.id] = {last_ran_at: now_utc()}
       state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
 
   return state
@@ -1871,6 +1920,11 @@ on_worker_exit(issue_id, reason, state):
 
   if reason == normal:
     state.completed.add(issue_id)  # bookkeeping only
+    state.completed_run_metadata[issue_id] = {
+      identifier: running_entry.identifier,
+      url: running_entry.issue.url,
+      last_ran_at: now_utc()
+    }
     state = schedule_retry(state, issue_id, 1, {
       identifier: running_entry.identifier,
       delay_type: continuation
@@ -1901,6 +1955,26 @@ on_retry_timer(issue_id, state):
   issue = find_by_id(candidates, issue_id)
   if issue is null:
     state.claimed.remove(issue_id)
+    state.completed.remove(issue_id)
+    state.completed_run_metadata.remove(issue_id)
+    state.watching.remove(issue_id)
+    return state
+
+  if issue.state in terminal_states:
+    state.claimed.remove(issue_id)
+    state.completed.remove(issue_id)
+    state.completed_run_metadata.remove(issue_id)
+    state.watching.remove(issue_id)
+    return state
+
+  if issue.state not in active_states:
+    state.claimed.remove(issue_id)
+    state.watching[issue_id] = {
+      identifier: issue.identifier,
+      state: issue.state,
+      url: issue.url,
+      last_ran_at: state.completed_run_metadata[issue_id].last_ran_at
+    }
     return state
 
   if available_slots(state) == 0:
@@ -1989,10 +2063,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
+- Completed issues in non-active, non-terminal states appear as watching rows
+- Terminal completed issues are removed from watching rows
 - Stall detection kills stalled sessions and schedules retry
 - Slot exhaustion requeues retries with explicit error reason
-- If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
-  limits
+- If a snapshot API is implemented, it returns running rows, watching rows, retry rows, token totals,
+  and rate limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
 ### 17.5 Coding-Agent App-Server Client

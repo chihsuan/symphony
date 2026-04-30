@@ -86,6 +86,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Watching</p>
+            <p class="metric-value numeric"><%= @payload.counts.watching %></p>
+            <p class="metric-detail">Recently handled issues waiting outside active states.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Retrying</p>
             <p class="metric-value numeric"><%= @payload.counts.retrying %></p>
             <p class="metric-detail">Issues waiting for the next retry window.</p>
@@ -209,6 +215,60 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <section class="section-card">
           <div class="section-header">
             <div>
+              <h2 class="section-title">Watching</h2>
+              <p class="section-copy">Recently handled issues waiting outside active and terminal workflow states.</p>
+            </div>
+          </div>
+
+          <%= if @payload.watching == [] do %>
+            <p class="empty-state">No watched issues.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table data-table-watching">
+                <colgroup>
+                  <col style="width: 12rem;" />
+                  <col style="width: 9rem;" />
+                  <col style="width: 9rem;" />
+                  <col />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>State</th>
+                    <th>Last run</th>
+                    <th>Linear URL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.watching}>
+                    <td>
+                      <span class="issue-id"><%= entry.issue_identifier %></span>
+                    </td>
+                    <td>
+                      <span class={state_badge_class(entry.state)}>
+                        <%= entry.state %>
+                      </span>
+                    </td>
+                    <td class="numeric"><%= format_last_run(entry, @now) %></td>
+                    <td>
+                      <%= if entry.url do %>
+                        <a class="issue-link watch-url" href={entry.url} target="_blank" rel="noreferrer">
+                          <%= entry.url %>
+                        </a>
+                      <% else %>
+                        <span class="muted">n/a</span>
+                      <% end %>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
               <h2 class="section-title">Retry queue</h2>
               <p class="section-copy">Issues waiting for the next retry window.</p>
             </div>
@@ -278,6 +338,39 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp format_runtime_and_turns(started_at, _turn_count, now),
     do: format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))
+
+  defp format_last_run(%{last_ran_at: last_ran_at}, now) do
+    case seconds_since(last_ran_at, now) do
+      seconds when is_integer(seconds) -> format_ago(seconds)
+      _ -> "n/a"
+    end
+  end
+
+  defp format_last_run(%{seconds_since_last_run: seconds}, _now) when is_integer(seconds) do
+    format_ago(seconds)
+  end
+
+  defp format_last_run(_entry, _now), do: "n/a"
+
+  defp seconds_since(timestamp, %DateTime{} = now) when is_binary(timestamp) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, parsed, _offset} -> DateTime.diff(now, parsed, :second) |> max(0)
+      _ -> nil
+    end
+  end
+
+  defp seconds_since(_timestamp, _now), do: nil
+
+  defp format_ago(seconds) when is_integer(seconds) and seconds >= 0 do
+    cond do
+      seconds < 60 -> "#{seconds}s ago"
+      seconds < 3_600 -> "#{div(seconds, 60)}m ago"
+      seconds < 86_400 -> "#{div(seconds, 3_600)}h ago"
+      true -> "#{div(seconds, 86_400)}d ago"
+    end
+  end
+
+  defp format_ago(_seconds), do: "n/a"
 
   defp format_runtime_seconds(seconds) when is_number(seconds) do
     whole_seconds = max(trunc(seconds), 0)
