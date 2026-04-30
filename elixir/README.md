@@ -95,6 +95,15 @@ workspace:
 hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
+routing:
+  - requires_label: js
+    hooks:
+      after_create: |
+        git clone git@github.com:your-org/js-package.git .
+  - requires_label: php
+    hooks:
+      after_create: |
+        git clone git@github.com:your-org/php-plugin.git .
 agent:
   max_concurrent_agents: 10
   max_turns: 20
@@ -125,6 +134,10 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
+- Use `routing` to override workspace hooks for issues with specific Linear labels. Entries are
+  checked in order; the first `requires_label` that matches an issue label wins. Hook fields omitted
+  from a matching route fall back to the top-level `hooks` values, and issues without a matching
+  label use the top-level hooks unchanged.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.

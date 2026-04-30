@@ -632,6 +632,117 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace after_create hook uses first matching workflow routing entry" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-routing-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo fallback > route.txt",
+        routing: [
+          %{
+            requires_label: "JS",
+            hooks: %{after_create: "echo js > route.txt"}
+          },
+          %{
+            requires_label: "php",
+            hooks: %{after_create: "echo php > route.txt"}
+          }
+        ]
+      )
+
+      js_issue = %Issue{
+        id: "issue-js",
+        identifier: "MT-ROUTE-JS",
+        title: "JS work",
+        state: "Todo",
+        labels: ["php", "js"]
+      }
+
+      assert {:ok, js_workspace} = Workspace.create_for_issue(js_issue)
+      assert File.read!(Path.join(js_workspace, "route.txt")) == "js\n"
+
+      fallback_issue = %Issue{
+        id: "issue-docs",
+        identifier: "MT-ROUTE-DOCS",
+        title: "Docs work",
+        state: "Todo",
+        labels: ["docs"]
+      }
+
+      assert {:ok, fallback_workspace} = Workspace.create_for_issue(fallback_issue)
+      assert File.read!(Path.join(fallback_workspace, "route.txt")) == "fallback\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "workflow routing hook overrides merge over top-level hooks" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-routing-merge-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      top_remove_marker = Path.join(test_root, "top-remove.txt")
+      route_remove_marker = Path.join(test_root, "route-remove.txt")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo fallback > route.txt",
+        hook_before_run: "echo top-before > before.txt",
+        hook_before_remove: "echo top-remove > \"#{top_remove_marker}\"",
+        hook_timeout_ms: 120_000,
+        routing: [
+          %{
+            requires_label: "js",
+            hooks: %{
+              after_create: "echo js > route.txt",
+              before_remove: "echo route-remove > \"#{route_remove_marker}\"",
+              timeout_ms: 5_000
+            }
+          }
+        ]
+      )
+
+      issue = %Issue{
+        id: "issue-js-merge",
+        identifier: "MT-ROUTE-MERGE",
+        title: "JS work",
+        state: "Todo",
+        labels: ["js"]
+      }
+
+      effective_hooks = Config.hooks_for_issue(issue)
+      assert effective_hooks.after_create == "echo js > route.txt"
+      assert String.trim(effective_hooks.before_run) == "echo top-before > before.txt"
+      assert effective_hooks.before_remove == "echo route-remove > \"#{route_remove_marker}\""
+      assert effective_hooks.timeout_ms == 5_000
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "route.txt")) == "js\n"
+
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+      assert File.read!(Path.join(workspace, "before.txt")) == "top-before\n"
+
+      assert :ok = Workspace.remove_issue_workspaces(issue)
+      assert File.read!(route_remove_marker) == "route-remove\n"
+      refute File.exists?(top_remove_marker)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace remove continues when before_remove hook fails" do
     test_root =
       Path.join(

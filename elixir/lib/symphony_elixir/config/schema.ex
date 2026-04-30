@@ -205,6 +205,8 @@ defmodule SymphonyElixir.Config.Schema do
     import Ecto.Changeset
 
     @primary_key false
+    @type t :: %__MODULE__{}
+
     embedded_schema do
       field(:after_create, :string)
       field(:before_run, :string)
@@ -218,6 +220,60 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(attrs, [:after_create, :before_run, :after_run, :before_remove, :timeout_ms], empty_values: [])
       |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
+  defmodule HookOverrides do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @type t :: %__MODULE__{}
+
+    embedded_schema do
+      field(:after_create, :string)
+      field(:before_run, :string)
+      field(:after_run, :string)
+      field(:before_remove, :string)
+      field(:timeout_ms, :integer)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:after_create, :before_run, :after_run, :before_remove, :timeout_ms], empty_values: [])
+      |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
+  defmodule Routing do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+    alias SymphonyElixir.Config.Schema.HookOverrides
+
+    @primary_key false
+    @type t :: %__MODULE__{}
+
+    embedded_schema do
+      field(:requires_label, :string)
+      embeds_one(:hooks, HookOverrides, on_replace: :update)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:requires_label], empty_values: [])
+      |> update_change(:requires_label, &Schema.normalize_issue_label/1)
+      |> validate_required([:requires_label])
+      |> validate_change(:requires_label, fn
+        :requires_label, "" -> [requires_label: "must not be blank"]
+        :requires_label, _label -> []
+      end)
+      |> cast_embed(:hooks, with: &HookOverrides.changeset/2)
     end
   end
 
@@ -269,6 +325,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_many(:routing, Routing, on_replace: :delete)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
@@ -322,6 +379,31 @@ defmodule SymphonyElixir.Config.Schema do
     String.downcase(state_name)
   end
 
+  @spec normalize_issue_label(term()) :: String.t()
+  def normalize_issue_label(label) when is_binary(label) do
+    label
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  def normalize_issue_label(nil), do: ""
+  def normalize_issue_label(label), do: label |> to_string() |> normalize_issue_label()
+
+  @spec hooks_for_issue(%__MODULE__{}, term()) :: Hooks.t()
+  def hooks_for_issue(%__MODULE__{} = settings, issue_or_labels) do
+    issue_labels =
+      issue_or_labels
+      |> extract_issue_labels()
+      |> normalized_issue_label_set()
+
+    (settings.routing || [])
+    |> Enum.find(&route_matches_issue_labels?(&1, issue_labels))
+    |> case do
+      nil -> settings.hooks
+      %Routing{} = route -> merge_hook_overrides(settings.hooks, route.hooks)
+    end
+  end
+
   @doc false
   @spec normalize_state_limits(nil | map()) :: map()
   def normalize_state_limits(nil), do: %{}
@@ -361,6 +443,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:routing, with: &Routing.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
@@ -394,6 +477,38 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
+
+  defp extract_issue_labels(labels) when is_list(labels), do: labels
+  defp extract_issue_labels(%{labels: labels}) when is_list(labels), do: labels
+  defp extract_issue_labels(%{"labels" => labels}) when is_list(labels), do: labels
+  defp extract_issue_labels(_issue_or_labels), do: []
+
+  defp normalized_issue_label_set(labels) when is_list(labels) do
+    labels
+    |> Enum.map(&normalize_issue_label/1)
+    |> Enum.reject(&(&1 == ""))
+    |> MapSet.new()
+  end
+
+  defp route_matches_issue_labels?(%Routing{requires_label: label}, issue_labels) do
+    MapSet.member?(issue_labels, label)
+  end
+
+  defp merge_hook_overrides(%Hooks{} = hooks, nil), do: hooks
+
+  defp merge_hook_overrides(%Hooks{} = hooks, %HookOverrides{} = overrides) do
+    %Hooks{
+      hooks
+      | after_create: hook_override(overrides.after_create, hooks.after_create),
+        before_run: hook_override(overrides.before_run, hooks.before_run),
+        after_run: hook_override(overrides.after_run, hooks.after_run),
+        before_remove: hook_override(overrides.before_remove, hooks.before_remove),
+        timeout_ms: hook_override(overrides.timeout_ms, hooks.timeout_ms)
+    }
+  end
+
+  defp hook_override(nil, fallback), do: fallback
+  defp hook_override(value, _fallback), do: value
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
