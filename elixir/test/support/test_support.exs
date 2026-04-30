@@ -15,6 +15,7 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Linear.Issue
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
+      alias SymphonyElixir.RunStore
       alias SymphonyElixir.StatusDashboard
       alias SymphonyElixir.Tracker
       alias SymphonyElixir.Workflow
@@ -36,6 +37,7 @@ defmodule SymphonyElixir.TestSupport do
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        if Process.whereis(SymphonyElixir.RunStore), do: SymphonyElixir.RunStore.clear()
         stop_default_http_server()
 
         on_exit(fn ->
