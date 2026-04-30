@@ -743,6 +743,51 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workflow routing rejects duplicate normalized labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      routing: [
+        %{requires_label: "JS"},
+        %{requires_label: " js "}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "routing"
+    assert message =~ "requires_label values must be unique"
+  end
+
+  test "workspace cleanup logs removal failures while keeping fire-and-forget API" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-remove-log-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      outside_workspace = Path.join(test_root, "outside")
+
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(outside_workspace)
+      File.write!(Path.join(outside_workspace, "marker.txt"), "keep\n")
+      File.ln_s!(outside_workspace, Path.join(workspace_root, "MT-ESCAPE"))
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      log =
+        capture_log(fn ->
+          assert :ok = Workspace.remove_issue_workspaces("MT-ESCAPE")
+        end)
+
+      assert log =~ "Workspace removal failed"
+      assert log =~ "issue_identifier=MT-ESCAPE"
+      assert log =~ "workspace_outside_root"
+      assert File.exists?(Path.join(outside_workspace, "marker.txt"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace remove continues when before_remove hook fails" do
     test_root =
       Path.join(

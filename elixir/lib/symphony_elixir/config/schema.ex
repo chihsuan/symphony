@@ -444,6 +444,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:routing, with: &Routing.changeset/2)
+    |> validate_unique_routing_labels()
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
@@ -477,6 +478,43 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
+
+  defp validate_unique_routing_labels(changeset) do
+    duplicate_labels =
+      changeset
+      |> get_change(:routing, [])
+      |> Enum.flat_map(&routing_label/1)
+      |> duplicate_values()
+
+    case duplicate_labels do
+      [] -> changeset
+      _duplicates -> add_error(changeset, :routing, "requires_label values must be unique")
+    end
+  end
+
+  defp routing_label(%Ecto.Changeset{} = changeset) do
+    case get_field(changeset, :requires_label) do
+      label when is_binary(label) and label != "" -> [label]
+      _label -> []
+    end
+  end
+
+  defp routing_label(%Routing{requires_label: label}) when is_binary(label) and label != "",
+    do: [label]
+
+  defp routing_label(_route), do: []
+
+  defp duplicate_values(values) do
+    {_seen, duplicates} =
+      Enum.reduce(values, {MapSet.new(), MapSet.new()}, fn value, {seen, duplicates} ->
+        case MapSet.member?(seen, value) do
+          true -> {seen, MapSet.put(duplicates, value)}
+          false -> {MapSet.put(seen, value), duplicates}
+        end
+      end)
+
+    MapSet.to_list(duplicates)
+  end
 
   defp extract_issue_labels(labels) when is_list(labels), do: labels
   defp extract_issue_labels(%{labels: labels}) when is_list(labels), do: labels

@@ -187,10 +187,18 @@ defmodule SymphonyElixir.Workspace do
 
     case workspace_path_for_issue(safe_id, worker_host) do
       {:ok, workspace} ->
-        remove_workspace(workspace, issue_context, worker_host)
+        case remove_workspace(workspace, issue_context, worker_host) do
+          {:ok, _removed_paths} ->
+            :ok
+
+          {:error, reason, output} ->
+            log_workspace_removal_failure(workspace, issue_context, worker_host, reason, output)
+        end
+
         :ok
 
-      {:error, _reason} ->
+      {:error, reason} ->
+        Logger.warning("Workspace removal skipped #{issue_log_context(issue_context)} identifier=#{identifier} worker_host=#{worker_host_for_log(worker_host)} reason=#{inspect(reason)}")
         :ok
     end
   end
@@ -403,6 +411,14 @@ defmodule SymphonyElixir.Workspace do
       false ->
         binary_part(binary_output, 0, max_bytes) <> "... (truncated)"
     end
+  end
+
+  defp log_workspace_removal_failure(workspace, issue_context, worker_host, reason, output) do
+    sanitized_output = sanitize_hook_output_for_log(output)
+
+    Logger.warning(
+      "Workspace removal failed #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host_for_log(worker_host)} reason=#{inspect(reason)} output=#{inspect(sanitized_output)}"
+    )
   end
 
   defp validate_workspace_path(workspace, nil) when is_binary(workspace) do

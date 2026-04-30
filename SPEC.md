@@ -882,6 +882,9 @@ Algorithm summary:
 
 Notes:
 
+- `before_run`, `after_run`, and `before_remove` use the same effective hook selection
+  as `after_create`, so a matched route applies consistently to every workspace lifecycle
+  hook execution point.
 - This section does not assume any specific repository/VCS workflow.
 - Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
   code generation) is implementation-defined and is typically handled via hooks.
