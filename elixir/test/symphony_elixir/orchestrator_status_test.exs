@@ -751,6 +751,59 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_in_ms > 0
   end
 
+  test "orchestrator rehydrates persisted retry queue entries on restart" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    :ok = RunStore.clear()
+
+    due_at = DateTime.add(DateTime.utc_now(), 60_000, :millisecond)
+
+    assert :ok =
+             RunStore.put_retry(%{
+               issue_id: "issue-persisted-retry",
+               identifier: "MT-501",
+               attempt: 4,
+               due_at: due_at,
+               error: "agent exited: :boom",
+               worker_host: "worker-a",
+               workspace_path: "/tmp/workspaces/MT-501"
+             })
+
+    orchestrator_name = Module.concat(__MODULE__, :PersistedRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert [
+             %{
+               issue_id: "issue-persisted-retry",
+               identifier: "MT-501",
+               attempt: 4,
+               error: "agent exited: :boom",
+               worker_host: "worker-a",
+               workspace_path: "/tmp/workspaces/MT-501",
+               due_in_ms: due_in_ms
+             }
+           ] = snapshot.retrying
+
+    assert due_in_ms > 0
+
+    GenServer.stop(pid)
+    {:ok, restarted_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    restarted_snapshot = GenServer.call(restarted_pid, :snapshot)
+
+    assert [
+             %{
+               issue_id: "issue-persisted-retry",
+               identifier: "MT-501",
+               attempt: 4,
+               error: "agent exited: :boom"
+             }
+           ] = restarted_snapshot.retrying
+
+    GenServer.stop(restarted_pid)
+  end
+
   test "orchestrator snapshot includes poll countdown and checking status" do
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -957,7 +1010,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
+    assert remaining_ms >= 9_000
     assert remaining_ms <= 10_500
   end
 

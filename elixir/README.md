@@ -80,6 +80,10 @@ Optional flags:
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
 
+Symphony also keeps an OTP-native durable run store next to the configured log file
+(`run_store/`). It persists run history, retry queue entries, session metadata, and aggregate token
+totals so retry backoff and observability data survive process restarts.
+
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
 
@@ -149,7 +153,8 @@ codex:
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. The state endpoint
+  includes recent durable run history when available.
 
 ## Web dashboard
 
