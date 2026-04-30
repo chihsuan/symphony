@@ -751,6 +751,94 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_in_ms > 0
   end
 
+  test "orchestrator watches completed issues in non-active non-terminal states" do
+    issue_id = "issue-watch"
+    last_ran_at = DateTime.add(DateTime.utc_now(), -7_200, :second)
+    issue_url = "https://linear.app/a8c/issue/MT-WATCH"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress"],
+      tracker_terminal_states: ["Done", "Canceled"]
+    )
+
+    waiting_issue = %Issue{
+      id: issue_id,
+      identifier: "MT-WATCH",
+      title: "Waiting for review",
+      state: "In Review",
+      url: issue_url
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting_issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :WatchingOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | completed: MapSet.put(state.completed, issue_id),
+          completed_run_metadata: %{
+            issue_id => %{
+              identifier: "MT-WATCH",
+              url: issue_url,
+              last_ran_at: last_ran_at
+            }
+          },
+          running: %{},
+          watching: %{},
+          retry_attempts: %{}
+      }
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_snapshot(pid, fn
+        %{watching: [%{identifier: "MT-WATCH", state: "In Review"}]} -> true
+        _ -> false
+      end)
+
+    assert snapshot.running == []
+    assert snapshot.retrying == []
+
+    assert [
+             %{
+               issue_id: ^issue_id,
+               identifier: "MT-WATCH",
+               state: "In Review",
+               url: ^issue_url,
+               last_ran_at: ^last_ran_at,
+               seconds_since_last_run: seconds_since_last_run
+             }
+           ] = snapshot.watching
+
+    assert seconds_since_last_run >= 7_190
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %{waiting_issue | state: "Done"}
+    ])
+
+    send(pid, :run_poll_cycle)
+
+    assert %{watching: []} =
+             wait_for_snapshot(pid, fn
+               %{watching: []} -> true
+               _ -> false
+             end)
+
+    final_state = :sys.get_state(pid)
+    refute MapSet.member?(final_state.completed, issue_id)
+    refute Map.has_key?(final_state.completed_run_metadata, issue_id)
+  end
+
   test "orchestrator rehydrates persisted retry queue entries on restart" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     :ok = RunStore.clear()
@@ -1057,6 +1145,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    tick_sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
     Process.sleep(100)
     state = :sys.get_state(pid)
@@ -1072,9 +1161,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_000
-    assert remaining_ms <= 10_500
+    assert due_at_ms >= tick_sent_at_ms + 9_000
+    assert due_at_ms <= tick_sent_at_ms + 10_500
   end
 
   test "status dashboard renders offline marker to terminal" do
@@ -1170,7 +1258,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert checking_rendered =~ "checking now…"
   end
 
-  test "status dashboard adds a spacer line before backoff queue when no agents are active" do
+  test "status dashboard adds spacer lines between empty running, watching, and backoff sections" do
     snapshot_data =
       {:ok,
        %{
@@ -1183,7 +1271,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
     plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
 
-    assert plain =~ ~r/No active agents\r?\n│\s*\r?\n├─ Backoff queue/
+    assert plain =~ ~r/No active agents\r?\n│\s*\r?\n├─ Watching/
+    assert plain =~ ~r/No watched issues\r?\n│\s*\r?\n├─ Backoff queue/
   end
 
   test "status dashboard adds a spacer line before backoff queue when agents are active" do

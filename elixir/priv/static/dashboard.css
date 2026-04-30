@@ -309,6 +309,10 @@ pre,
   min-width: 980px;
 }
 
+.data-table-watching {
+  min-width: 760px;
+}
+
 .data-table th {
   padding: 0 0.5rem 0.75rem 0;
   text-align: left;
@@ -391,6 +395,12 @@ pre,
 .issue-link {
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.watch-url {
+  display: inline-block;
+  max-width: 100%;
+  word-break: break-all;
 }
 
 .muted {

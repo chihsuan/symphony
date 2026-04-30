@@ -995,6 +995,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workflow routing supports label inputs and routes without hook overrides" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      hook_after_create: "echo fallback > route.txt",
+      hook_before_run: "echo top-before > before.txt",
+      routing: [
+        %{requires_label: "docs"}
+      ]
+    )
+
+    settings = Config.settings!()
+
+    assert Config.hooks_for_issue(["docs", nil, :api]) == settings.hooks
+    assert Config.hooks_for_issue(%{"labels" => ["docs"]}) == settings.hooks
+    assert Config.hooks_for_issue(%{"labels" => "docs"}) == settings.hooks
+  end
+
   test "workflow routing rejects duplicate normalized labels" do
     write_workflow_file!(Workflow.workflow_file_path(),
       routing: [
@@ -1006,6 +1022,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "routing"
     assert message =~ "requires_label values must be unique"
+  end
+
+  test "workflow routing rejects blank labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      routing: [
+        %{requires_label: ""}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "routing"
+    assert message =~ "requires_label"
+    assert message =~ "can't be blank"
   end
 
   test "workspace cleanup logs removal failures while keeping fire-and-forget API" do

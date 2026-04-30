@@ -24,6 +24,11 @@ defmodule SymphonyElixir.StatusDashboard do
   @running_event_default_width 44
   @running_event_min_width 12
   @running_row_chrome_width 10
+  @watching_id_width 8
+  @watching_state_width 14
+  @watching_age_width 12
+  @watching_url_min_width 24
+  @watching_row_chrome_width 11
   @default_terminal_columns 115
 
   @ansi_reset IO.ANSI.reset()
@@ -314,6 +319,7 @@ defmodule SymphonyElixir.StatusDashboard do
           {:ok,
            %{
              running: running,
+             watching: Map.get(snapshot, :watching, []),
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -333,6 +339,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+        watching = Map.get(snapshot, :watching, [])
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
@@ -344,7 +351,10 @@ defmodule SymphonyElixir.StatusDashboard do
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
-        running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
+        running_to_watching_spacer = if(running == [], do: [], else: ["│"])
+        watching_url_width = watching_url_width(terminal_columns_override)
+        watching_rows = format_watching_rows(watching, watching_url_width)
+        watching_to_backoff_spacer = if(watching == [], do: [], else: ["│"])
         backoff_rows = format_retry_rows(retrying)
 
         ([
@@ -371,7 +381,10 @@ defmodule SymphonyElixir.StatusDashboard do
            running_table_separator_row(running_event_width)
          ] ++
            running_rows ++
-           running_to_backoff_spacer ++
+           running_to_watching_spacer ++
+           [colorize("├─ Watching", @ansi_bold), "│"] ++
+           watching_rows ++
+           watching_to_backoff_spacer ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -559,6 +572,7 @@ defmodule SymphonyElixir.StatusDashboard do
           {:ok,
            %{
              running: running,
+             watching: Map.get(snapshot, :watching, []),
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -636,6 +650,114 @@ defmodule SymphonyElixir.StatusDashboard do
   @spec format_running_summary_for_test(map(), integer() | nil) :: String.t()
   def format_running_summary_for_test(running_entry, terminal_columns \\ nil),
     do: format_running_summary(running_entry, running_event_width(terminal_columns))
+
+  @doc false
+  @spec format_watching_summary_for_test(map(), integer() | nil) :: String.t()
+  def format_watching_summary_for_test(watching_entry, terminal_columns \\ nil),
+    do: format_watching_summary(watching_entry, watching_url_width(terminal_columns))
+
+  defp format_watching_rows(watching, watching_url_width) do
+    base_rows = [
+      watching_table_header_row(watching_url_width),
+      watching_table_separator_row(watching_url_width)
+    ]
+
+    if watching == [] do
+      base_rows ++
+        [
+          "│  " <> colorize("No watched issues", @ansi_gray),
+          "│"
+        ]
+    else
+      base_rows ++
+        (watching
+         |> Enum.sort_by(&watching_sort_key/1)
+         |> Enum.map(&format_watching_summary(&1, watching_url_width)))
+    end
+  end
+
+  defp watching_sort_key(entry) do
+    {
+      map_value(entry, [:seconds_since_last_run, "seconds_since_last_run"]) || 0,
+      map_value(entry, [:identifier, "identifier"]) || map_value(entry, [:issue_id, "issue_id"]) || ""
+    }
+  end
+
+  defp format_watching_summary(watching_entry, watching_url_width) do
+    issue_id = map_value(watching_entry, [:issue_id, "issue_id"]) || "unknown"
+    identifier = map_value(watching_entry, [:identifier, "identifier"]) || issue_id
+    state = map_value(watching_entry, [:state, "state"]) || "unknown"
+    seconds_since_last_run = map_value(watching_entry, [:seconds_since_last_run, "seconds_since_last_run"])
+    url = map_value(watching_entry, [:url, "url"]) || "n/a"
+
+    [
+      "│ ",
+      colorize("◌", @ansi_blue),
+      " ",
+      colorize(format_cell(identifier, @watching_id_width), @ansi_cyan),
+      " ",
+      colorize(format_cell(state, @watching_state_width), @ansi_yellow),
+      " ",
+      colorize(format_cell(format_ago(seconds_since_last_run), @watching_age_width), @ansi_magenta),
+      " ",
+      colorize(format_cell(url, watching_url_width), @ansi_cyan)
+    ]
+    |> Enum.join("")
+  end
+
+  defp watching_table_header_row(watching_url_width) do
+    header =
+      [
+        format_cell("ID", @watching_id_width),
+        format_cell("STATE", @watching_state_width),
+        format_cell("LAST RUN", @watching_age_width),
+        format_cell("LINEAR URL", watching_url_width)
+      ]
+      |> Enum.join(" ")
+
+    "│   " <> colorize(header, @ansi_gray)
+  end
+
+  defp watching_table_separator_row(watching_url_width) do
+    separator_width =
+      @watching_id_width +
+        @watching_state_width +
+        @watching_age_width +
+        watching_url_width + 3
+
+    "│   " <> colorize(String.duplicate("─", separator_width), @ansi_gray)
+  end
+
+  defp watching_url_width(terminal_columns) do
+    terminal_columns = terminal_columns || terminal_columns()
+
+    max(
+      @watching_url_min_width,
+      terminal_columns -
+        @watching_id_width -
+        @watching_state_width -
+        @watching_age_width -
+        @watching_row_chrome_width
+    )
+  end
+
+  defp format_ago(seconds) when is_integer(seconds) and seconds >= 0 do
+    cond do
+      seconds < 60 ->
+        "#{seconds}s ago"
+
+      seconds < 3_600 ->
+        "#{div(seconds, 60)}m ago"
+
+      seconds < 86_400 ->
+        "#{div(seconds, 3_600)}h ago"
+
+      true ->
+        "#{div(seconds, 86_400)}d ago"
+    end
+  end
+
+  defp format_ago(_seconds), do: "n/a"
 
   @doc false
   @spec format_tps_for_test(number()) :: String.t()

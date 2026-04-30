@@ -342,7 +342,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{"running" => 1, "watching" => 1, "retrying" => 1},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -358,6 +358,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+               }
+             ],
+             "watching" => [
+               %{
+                 "issue_id" => "issue-watch",
+                 "issue_identifier" => "MT-WATCH",
+                 "state" => "In Review",
+                 "url" => "https://linear.app/a8c/issue/MT-WATCH",
+                 "last_ran_at" => state_payload["watching"] |> List.first() |> Map.fetch!("last_ran_at"),
+                 "seconds_since_last_run" => 3_600
                }
              ],
              "retrying" => [
@@ -437,6 +447,29 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
              json_response(conn, 200)
+
+    conn = get(build_conn(), "/api/v1/MT-WATCH")
+    watching_payload = json_response(conn, 200)
+
+    assert watching_payload == %{
+             "issue_identifier" => "MT-WATCH",
+             "issue_id" => "issue-watch",
+             "status" => "watching",
+             "workspace" => nil,
+             "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
+             "running" => nil,
+             "retry" => nil,
+             "watching" => %{
+               "state" => "In Review",
+               "url" => "https://linear.app/a8c/issue/MT-WATCH",
+               "last_ran_at" => state_payload["watching"] |> List.first() |> Map.fetch!("last_ran_at"),
+               "seconds_since_last_run" => 3_600
+             },
+             "logs" => %{"codex_session_logs" => []},
+             "recent_events" => [],
+             "last_error" => nil,
+             "tracked" => %{}
+           }
 
     conn = get(build_conn(), "/api/v1/MT-MISSING")
 
@@ -564,7 +597,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, view, html} = live(build_conn(), "/")
     assert html =~ "Operations Dashboard"
     assert html =~ "MT-HTTP"
+    assert html =~ "MT-WATCH"
     assert html =~ "MT-RETRY"
+    assert html =~ "https://linear.app/a8c/issue/MT-WATCH"
     assert html =~ "rendered"
     assert html =~ "Runtime"
     assert html =~ "Live"
@@ -664,7 +699,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"running" => 1, "watching" => 1, "retrying" => 1}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -723,6 +758,16 @@ defmodule SymphonyElixir.ExtensionsTest do
           codex_output_tokens: 8,
           codex_total_tokens: 12,
           started_at: DateTime.utc_now()
+        }
+      ],
+      watching: [
+        %{
+          issue_id: "issue-watch",
+          identifier: "MT-WATCH",
+          state: "In Review",
+          url: "https://linear.app/a8c/issue/MT-WATCH",
+          last_ran_at: DateTime.add(DateTime.utc_now(), -3_600, :second),
+          seconds_since_last_run: 3_600
         }
       ],
       retrying: [

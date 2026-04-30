@@ -35,6 +35,8 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_token,
       running: %{},
       completed: MapSet.new(),
+      completed_run_metadata: %{},
+      watching: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
@@ -144,7 +146,7 @@ defmodule SymphonyElixir.Orchestrator do
               Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
               state
-              |> complete_issue(issue_id)
+              |> complete_issue(issue_id, running_entry)
               |> schedule_issue_retry(issue_id, 1, %{
                 identifier: running_entry.identifier,
                 delay_type: :continuation,
@@ -233,7 +235,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
-    state = reconcile_running_issues(state)
+    state =
+      state
+      |> reconcile_running_issues()
+      |> reconcile_watching_issues()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -373,11 +378,95 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, track_completed_run: true)
     end
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp reconcile_watching_issues(%State{} = state) do
+    issue_ids =
+      state.completed_run_metadata
+      |> Map.keys()
+      |> MapSet.new()
+      |> MapSet.union(Map.keys(state.watching) |> MapSet.new())
+      |> MapSet.to_list()
+      |> Enum.reject(&Map.has_key?(state.retry_attempts, &1))
+
+    if issue_ids == [] do
+      state
+    else
+      case Tracker.fetch_issue_states_by_ids(issue_ids) do
+        {:ok, issues} ->
+          issues
+          |> reconcile_watching_issue_states(
+            state,
+            active_state_set(),
+            terminal_state_set()
+          )
+          |> reconcile_missing_watching_issue_ids(issue_ids, issues)
+
+        {:error, reason} ->
+          Logger.warning("Failed to refresh watching issue states: #{inspect(reason)}; keeping watched issues")
+          state
+      end
+    end
+  end
+
+  defp reconcile_watching_issue_states([], state, _active_states, _terminal_states), do: state
+
+  defp reconcile_watching_issue_states([issue | rest], state, active_states, terminal_states) do
+    reconcile_watching_issue_states(
+      rest,
+      reconcile_watching_issue_state(issue, state, active_states, terminal_states),
+      active_states,
+      terminal_states
+    )
+  end
+
+  defp reconcile_watching_issue_state(
+         %Issue{id: issue_id, state: state_name} = issue,
+         state,
+         active_states,
+         terminal_states
+       )
+       when is_binary(issue_id) and is_binary(state_name) do
+    cond do
+      terminal_issue_state?(state_name, terminal_states) ->
+        Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{state_name}; removing from watching")
+        forget_completed_issue(state, issue_id)
+
+      watching_issue_state?(state_name, active_states, terminal_states) ->
+        put_watching_issue(state, issue)
+
+      true ->
+        %{state | watching: Map.delete(state.watching, issue_id)}
+    end
+  end
+
+  defp reconcile_watching_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp reconcile_missing_watching_issue_ids(%State{} = state, requested_issue_ids, issues)
+       when is_list(requested_issue_ids) and is_list(issues) do
+    visible_issue_ids =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
+        _ -> []
+      end)
+      |> MapSet.new()
+
+    Enum.reduce(requested_issue_ids, state, fn issue_id, state_acc ->
+      if MapSet.member?(visible_issue_ids, issue_id) do
+        state_acc
+      else
+        Logger.info("Issue no longer visible during watching-state refresh: issue_id=#{issue_id}; removing from watching")
+        forget_completed_issue(state_acc, issue_id)
+      end
+    end)
+  end
+
+  defp reconcile_missing_watching_issue_ids(state, _requested_issue_ids, _issues), do: state
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
@@ -430,6 +519,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
+        state = maybe_track_completed_run(state, issue_id, running_entry, cleanup_workspace, opts)
 
         persist_run_completion(
           running_entry,
@@ -661,6 +751,15 @@ defmodule SymphonyElixir.Orchestrator do
     MapSet.member?(active_states, normalize_issue_state(state_name))
   end
 
+  defp active_issue_state?(_state_name, _active_states), do: false
+
+  defp watching_issue_state?(state_name, active_states, terminal_states) when is_binary(state_name) do
+    !active_issue_state?(state_name, active_states) and
+      !terminal_issue_state?(state_name, terminal_states)
+  end
+
+  defp watching_issue_state?(_state_name, _active_states, _terminal_states), do: false
+
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
   end
@@ -756,6 +855,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           state
           | running: running,
+            watching: Map.delete(state.watching, issue.id),
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
@@ -792,14 +892,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
-  defp complete_issue(%State{} = state, issue_id) do
+  defp complete_issue(%State{} = state, issue_id, running_entry) do
     delete_persisted_retry(issue_id)
+    state = remember_completed_run(state, issue_id, running_entry)
 
-    %{
-      state
-      | completed: MapSet.put(state.completed, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
-    }
+    %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
@@ -897,7 +994,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         cleanup_issue_workspace(issue, metadata[:worker_host])
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, state |> forget_completed_issue(issue_id) |> release_issue_claim(issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -905,13 +1002,20 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
+        state =
+          if watching_issue_state?(issue.state, active_state_set(), terminal_states) do
+            put_watching_issue(state, issue)
+          else
+            %{state | watching: Map.delete(state.watching, issue_id)}
+          end
+
         {:noreply, release_issue_claim(state, issue_id)}
     end
   end
 
   defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, _metadata) do
     Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
-    {:noreply, release_issue_claim(state, issue_id)}
+    {:noreply, state |> forget_completed_issue(issue_id) |> release_issue_claim(issue_id)}
   end
 
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
@@ -1442,9 +1546,25 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    watching =
+      state.watching
+      |> Enum.map(fn {issue_id, watching_entry} ->
+        last_ran_at = Map.get(watching_entry, :last_ran_at)
+
+        %{
+          issue_id: issue_id,
+          identifier: Map.get(watching_entry, :identifier),
+          state: Map.get(watching_entry, :state),
+          url: Map.get(watching_entry, :url),
+          last_ran_at: last_ran_at,
+          seconds_since_last_run: seconds_since(last_ran_at, now)
+        }
+      end)
+
     {:reply,
      %{
        running: running,
+       watching: watching,
        retrying: retrying,
        run_history: persisted_run_history(),
        codex_totals: state.codex_totals,
@@ -1589,6 +1709,83 @@ defmodule SymphonyElixir.Orchestrator do
   defp pop_running_entry(state, issue_id) do
     {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
   end
+
+  defp remember_completed_run(%State{} = state, issue_id, running_entry) when is_binary(issue_id) do
+    %{
+      state
+      | completed: MapSet.put(state.completed, issue_id),
+        completed_run_metadata: Map.put(state.completed_run_metadata, issue_id, completed_run_metadata(running_entry))
+    }
+  end
+
+  defp remember_completed_run(state, _issue_id, _running_entry), do: state
+
+  defp maybe_track_completed_run(state, issue_id, running_entry, cleanup_workspace, opts) do
+    cond do
+      Keyword.get(opts, :track_completed_run, false) ->
+        remember_completed_run(state, issue_id, running_entry)
+
+      cleanup_workspace ->
+        forget_completed_issue(state, issue_id)
+
+      true ->
+        state
+    end
+  end
+
+  defp completed_run_metadata(running_entry) when is_map(running_entry) do
+    issue = Map.get(running_entry, :issue)
+
+    %{
+      identifier: Map.get(running_entry, :identifier) || issue_identifier(issue),
+      url: issue_url(issue),
+      last_ran_at: DateTime.utc_now()
+    }
+  end
+
+  defp completed_run_metadata(_running_entry) do
+    %{identifier: nil, url: nil, last_ran_at: DateTime.utc_now()}
+  end
+
+  defp put_watching_issue(%State{} = state, %Issue{id: issue_id} = issue) when is_binary(issue_id) do
+    completed_metadata = Map.get(state.completed_run_metadata, issue_id, %{})
+    existing = Map.get(state.watching, issue_id, %{})
+
+    watching_entry = %{
+      identifier:
+        issue.identifier ||
+          Map.get(completed_metadata, :identifier) ||
+          Map.get(existing, :identifier) ||
+          issue_id,
+      state: issue.state,
+      url: issue.url || Map.get(completed_metadata, :url) || Map.get(existing, :url),
+      last_ran_at:
+        Map.get(completed_metadata, :last_ran_at) ||
+          Map.get(existing, :last_ran_at) ||
+          DateTime.utc_now()
+    }
+
+    %{state | watching: Map.put(state.watching, issue_id, watching_entry)}
+  end
+
+  defp put_watching_issue(state, _issue), do: state
+
+  defp forget_completed_issue(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{
+      state
+      | completed: MapSet.delete(state.completed, issue_id),
+        completed_run_metadata: Map.delete(state.completed_run_metadata, issue_id),
+        watching: Map.delete(state.watching, issue_id)
+    }
+  end
+
+  defp forget_completed_issue(state, _issue_id), do: state
+
+  defp issue_identifier(%Issue{identifier: identifier}), do: identifier
+  defp issue_identifier(_issue), do: nil
+
+  defp issue_url(%Issue{url: url}), do: url
+  defp issue_url(_issue), do: nil
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
@@ -1960,6 +2157,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp running_seconds(_started_at, _now), do: 0
+
+  defp seconds_since(%DateTime{} = timestamp, %DateTime{} = now) do
+    max(0, DateTime.diff(now, timestamp, :second))
+  end
+
+  defp seconds_since(_timestamp, _now), do: nil
 
   defp integer_like(value) when is_integer(value) and value >= 0, do: value
 

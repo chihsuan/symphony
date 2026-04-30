@@ -26,6 +26,10 @@ skills can make raw Linear GraphQL calls.
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
+If Symphony recently ran an agent for an issue that later moves outside active states but has not
+reached a terminal state, the terminal status view and LiveView dashboard show it in a Watching
+section with its current Linear state, last-run age, and Linear URL.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see
@@ -189,6 +193,8 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - LiveView for the dashboard at `/`
 - JSON API for operational debugging under `/api/v1/*`
+- Running, Watching, and retry queue sections for active sessions, human-waiting issues, and backoff
+  pressure
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 

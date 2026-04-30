@@ -273,10 +273,6 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(attrs, [:requires_label], empty_values: [])
       |> update_change(:requires_label, &Schema.normalize_issue_label/1)
       |> validate_required([:requires_label])
-      |> validate_change(:requires_label, fn
-        :requires_label, "" -> [requires_label: "must not be blank"]
-        :requires_label, _label -> []
-      end)
       |> cast_embed(:hooks, with: &HookOverrides.changeset/2)
     end
   end
@@ -368,15 +364,8 @@ defmodule SymphonyElixir.Config.Schema do
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
     case settings.codex.turn_sandbox_policy do
-      %{} = policy when is_map_key(policy, "writableRoots") ->
-        {:ok, policy}
-
       %{} = policy ->
-        workspace_root = default_workspace_root(workspace, settings.workspace.root)
-
-        with {:ok, default_policy} <- default_runtime_turn_sandbox_policy(workspace_root, opts) do
-          {:ok, Map.merge(default_policy, policy)}
-        end
+        resolve_explicit_runtime_turn_sandbox_policy(policy, workspace, settings.workspace.root, opts)
 
       _ ->
         workspace
@@ -495,7 +484,12 @@ defmodule SymphonyElixir.Config.Schema do
     duplicate_labels =
       changeset
       |> get_change(:routing, [])
-      |> Enum.flat_map(&routing_label/1)
+      |> Enum.flat_map(fn route_changeset ->
+        case get_field(route_changeset, :requires_label) do
+          label when is_binary(label) and label != "" -> [label]
+          _label -> []
+        end
+      end)
       |> duplicate_values()
 
     case duplicate_labels do
@@ -503,18 +497,6 @@ defmodule SymphonyElixir.Config.Schema do
       _duplicates -> add_error(changeset, :routing, "requires_label values must be unique")
     end
   end
-
-  defp routing_label(%Ecto.Changeset{} = changeset) do
-    case get_field(changeset, :requires_label) do
-      label when is_binary(label) and label != "" -> [label]
-      _label -> []
-    end
-  end
-
-  defp routing_label(%Routing{requires_label: label}) when is_binary(label) and label != "",
-    do: [label]
-
-  defp routing_label(_route), do: []
 
   defp duplicate_values(values) do
     {_seen, duplicates} =
@@ -672,6 +654,28 @@ defmodule SymphonyElixir.Config.Schema do
     {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
   end
 
+  defp resolve_explicit_runtime_turn_sandbox_policy(policy, workspace, fallback_workspace, opts) do
+    case default_runtime_policy_override?(policy) do
+      true ->
+        workspace
+        |> default_workspace_root(fallback_workspace)
+        |> merge_default_runtime_turn_sandbox_policy(policy, opts)
+
+      false ->
+        {:ok, policy}
+    end
+  end
+
+  defp merge_default_runtime_turn_sandbox_policy(workspace_root, policy, opts) do
+    with {:ok, default_policy} <- default_runtime_turn_sandbox_policy(workspace_root, opts) do
+      {:ok, Map.merge(default_policy, policy)}
+    end
+  end
+
+  defp default_runtime_policy_override?(policy) when is_map(policy) do
+    not Map.has_key?(policy, "writableRoots") and Map.get(policy, "type", "workspaceWrite") == "workspaceWrite"
+  end
+
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
     do: workspace
 
@@ -710,7 +714,10 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp flatten_errors(errors, prefix) when is_list(errors) do
-    Enum.map(errors, &(prefix <> " " <> &1))
+    Enum.flat_map(errors, fn
+      error when is_binary(error) -> [prefix <> " " <> error]
+      nested -> flatten_errors(nested, prefix)
+    end)
   end
 
   defp translate_error({message, options}) do

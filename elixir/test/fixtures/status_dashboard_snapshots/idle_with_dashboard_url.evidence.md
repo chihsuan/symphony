@@ -10,9 +10,15 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT                                  
+│   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 │  No active agents
+│
+├─ Watching
+│
+│   ID       STATE          LAST RUN     LINEAR URL
+│   ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+│  No watched issues
 │
 ├─ Backoff queue
 │

@@ -12,6 +12,12 @@
 │   \e[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────────\e[0m
 │ \e[34m●\e[0m \e[36mMT-638  \e[0m \e[34mretrying      \e[0m \e[33m4242    \e[0m \e[35m20m 25s / 7 \e[0m \e[33m    14,200\e[0m \e[36mthre...567890 \e[0m \e[34magent message streaming: waiting on ...\e[0m
 │
+\e[1m├─ Watching\e[0m
+│
+│   \e[90mID       STATE          LAST RUN     LINEAR URL                                                            \e[0m
+│   \e[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────\e[0m
+│  \e[90mNo watched issues\e[0m
+│
 \e[1m├─ Backoff queue\e[0m
 │
 │  \e[33m↻\e[0m \e[31mMT-450\e[0m \e[33mattempt=4\e[0m\e[2m in \e[0m\e[36m1.250s\e[0m \e[2merror=rate limit exhausted\e[0m
