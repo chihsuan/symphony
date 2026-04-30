@@ -102,4 +102,36 @@ defmodule SymphonyElixir.RunStoreTest do
              }
            ] = RunStore.list_runs()
   end
+
+  test "interrupt_running_runs skips malformed running records" do
+    now = DateTime.utc_now()
+
+    assert :ok =
+             RunStore.put_run(%{
+               run_id: "run-valid",
+               issue_id: "issue-valid",
+               issue_identifier: "RSM-3",
+               status: "running",
+               attempt: 1,
+               started_at: now
+             })
+
+    assert {:atomic, :ok} =
+             :mnesia.transaction(fn ->
+               :mnesia.write({:symphony_run_store_runs, "malformed", %{status: "running"}})
+               :ok
+             end)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, 1} = RunStore.interrupt_running_runs("orchestrator restarted before worker exit")
+      end)
+
+    assert log =~ "Skipping malformed running run store record"
+
+    assert [
+             %{run_id: "run-valid", status: "failure"},
+             %{status: "running"}
+           ] = Enum.sort_by(RunStore.list_runs(:all), &Map.get(&1, :run_id, "zzz"))
+  end
 end

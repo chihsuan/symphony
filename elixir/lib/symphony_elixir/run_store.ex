@@ -60,16 +60,7 @@ defmodule SymphonyElixir.RunStore do
   @spec update_run(String.t(), map()) :: :ok | {:error, term()}
   def update_run(run_id, attrs) when is_binary(run_id) and is_map(attrs) do
     with :ok <- ensure_started() do
-      durable_transaction(fn ->
-        case :mnesia.read(@runs_table, run_id) do
-          [{@runs_table, ^run_id, record}] ->
-            :mnesia.write({@runs_table, run_id, Map.merge(record, normalize_record(attrs))})
-            :ok
-
-          [] ->
-            {:error, :run_not_found}
-        end
-      end)
+      update_run_record(run_id, attrs)
       |> unwrap_nested_error()
     end
   end
@@ -103,29 +94,7 @@ defmodule SymphonyElixir.RunStore do
 
     with :ok <- ensure_started() do
       durable_transaction(fn ->
-        records = all_records(@runs_table)
-
-        interrupted =
-          Enum.reduce(records, 0, fn record, count ->
-            if Map.get(record, :status) == "running" do
-              run_id = Map.fetch!(record, :run_id)
-
-              updated =
-                Map.merge(record, %{
-                  status: "failure",
-                  ended_at: now,
-                  error: error,
-                  updated_at: now
-                })
-
-              :mnesia.write({@runs_table, run_id, updated})
-              count + 1
-            else
-              count
-            end
-          end)
-
-        {:ok, interrupted}
+        {:ok, interrupt_running_records(error, now)}
       end)
       |> unwrap_nested_error()
     end
@@ -183,27 +152,16 @@ defmodule SymphonyElixir.RunStore do
   @spec get_codex_totals() :: map() | nil | {:error, term()}
   def get_codex_totals do
     with :ok <- ensure_started() do
-      transaction(fn ->
-        case :mnesia.read(@totals_table, @codex_totals_key) do
-          [{@totals_table, @codex_totals_key, totals}] -> totals
-          [] -> nil
-        end
-      end)
+      transaction(&read_codex_totals/0)
     end
   end
 
   @spec clear() :: :ok | {:error, term()}
   def clear do
     with :ok <- ensure_started() do
-      case Enum.reduce_while(@data_tables, :ok, fn table, :ok ->
-             case :mnesia.clear_table(table) do
-               {:atomic, :ok} -> {:cont, :ok}
-               {:aborted, reason} -> {:halt, {:error, reason}}
-             end
-           end) do
-        :ok -> sync_mnesia_log()
-        {:error, reason} -> {:error, reason}
-      end
+      @data_tables
+      |> Enum.reduce_while(:ok, &clear_table/2)
+      |> sync_after_clear()
     end
   end
 
@@ -232,27 +190,42 @@ defmodule SymphonyElixir.RunStore do
   defp setup_mnesia(dir) when is_binary(dir) do
     expanded_dir = Path.expand(dir)
 
-    with :ok <- File.mkdir_p(expanded_dir),
-         :ok <- start_mnesia(expanded_dir),
-         :ok <- ensure_tables() do
-      :ok
+    case File.mkdir_p(expanded_dir) do
+      :ok -> start_and_ensure_mnesia(expanded_dir)
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp setup_mnesia(_dir), do: {:error, :invalid_run_store_dir}
 
-  defp start_mnesia(dir) do
-    with :ok <- load_mnesia() do
-      if mnesia_running?() do
-        :ok
-      else
-        Application.put_env(:mnesia, :dir, String.to_charlist(dir))
+  defp start_and_ensure_mnesia(dir) do
+    case start_mnesia(dir) do
+      :ok -> ensure_tables()
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-        with :ok <- create_schema(),
-             :ok <- normalize_mnesia_start(:mnesia.start()) do
-          :ok
-        end
-      end
+  defp start_mnesia(dir) do
+    case load_mnesia() do
+      :ok -> start_or_validate_mnesia(dir)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp start_or_validate_mnesia(dir) do
+    if mnesia_running?() do
+      ensure_running_mnesia_dir(dir)
+    else
+      start_stopped_mnesia(dir)
+    end
+  end
+
+  defp start_stopped_mnesia(dir) do
+    Application.put_env(:mnesia, :dir, String.to_charlist(dir))
+
+    case create_schema() do
+      :ok -> normalize_mnesia_start(:mnesia.start())
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -281,6 +254,19 @@ defmodule SymphonyElixir.RunStore do
 
   defp normalize_mnesia_start(:ok), do: :ok
   defp normalize_mnesia_start({:error, reason}), do: {:error, reason}
+
+  defp ensure_running_mnesia_dir(expected_dir) do
+    running_dir =
+      :mnesia.system_info(:directory)
+      |> to_string()
+      |> Path.expand()
+
+    if running_dir == expected_dir do
+      :ok
+    else
+      {:error, {:mnesia_dir_mismatch, %{expected: expected_dir, running: running_dir}}}
+    end
+  end
 
   defp ensure_tables do
     with :ok <- Enum.reduce_while(@tables, :ok, &ensure_table/2) do
@@ -319,14 +305,32 @@ defmodule SymphonyElixir.RunStore do
     end
   end
 
+  defp update_run_record(run_id, attrs) do
+    durable_transaction(fn ->
+      case :mnesia.read(@runs_table, run_id) do
+        [{@runs_table, ^run_id, record}] ->
+          :mnesia.write({@runs_table, run_id, Map.merge(record, normalize_record(attrs))})
+          :ok
+
+        [] ->
+          {:error, :run_not_found}
+      end
+    end)
+  end
+
   defp durable_transaction(fun) when is_function(fun, 0) do
     case transaction(fun) do
       {:error, _reason} = error ->
         error
 
       result ->
-        with :ok <- sync_mnesia_log() do
-          result
+        case sync_mnesia_log() do
+          :ok ->
+            result
+
+          {:error, reason} ->
+            Logger.warning("Run store transaction committed but failed to sync Mnesia log: #{inspect(reason)}")
+            result
         end
     end
   end
@@ -335,7 +339,23 @@ defmodule SymphonyElixir.RunStore do
     case :mnesia.sync_log() do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
-      other -> {:error, {:sync_log_failed, other}}
+    end
+  end
+
+  defp clear_table(table, :ok) do
+    case :mnesia.clear_table(table) do
+      {:atomic, :ok} -> {:cont, :ok}
+      {:aborted, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp sync_after_clear(:ok), do: sync_mnesia_log()
+  defp sync_after_clear({:error, reason}), do: {:error, reason}
+
+  defp read_codex_totals do
+    case :mnesia.read(@totals_table, @codex_totals_key) do
+      [{@totals_table, @codex_totals_key, totals}] -> totals
+      [] -> nil
     end
   end
 
@@ -346,6 +366,38 @@ defmodule SymphonyElixir.RunStore do
 
   defp normalize_record(record) when is_map(record) do
     Map.new(record)
+  end
+
+  defp interrupt_running_records(error, now) do
+    @runs_table
+    |> all_records()
+    |> Enum.reduce(0, &interrupt_running_record(&1, error, now, &2))
+  end
+
+  defp interrupt_running_record(%{status: "running"} = record, error, now, count) do
+    write_interrupted_run_record(record, error, now, count)
+  end
+
+  defp interrupt_running_record(_record, _error, _now, count), do: count
+
+  defp write_interrupted_run_record(record, error, now, count) do
+    case Map.get(record, :run_id) do
+      run_id when is_binary(run_id) ->
+        updated =
+          Map.merge(record, %{
+            status: "failure",
+            ended_at: now,
+            error: error,
+            updated_at: now
+          })
+
+        :mnesia.write({@runs_table, run_id, updated})
+        count + 1
+
+      malformed_run_id ->
+        Logger.warning("Skipping malformed running run store record during startup recovery run_id=#{inspect(malformed_run_id)}")
+        count
+    end
   end
 
   defp datetime_sort_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)

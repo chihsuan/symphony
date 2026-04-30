@@ -1276,8 +1276,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> log_run_store_error("persist codex totals")
   end
 
-  defp persist_codex_totals(_totals), do: :ok
-
   defp delete_persisted_retry(issue_id) when is_binary(issue_id) do
     issue_id
     |> RunStore.delete_retry()
@@ -1368,8 +1366,6 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Failed to #{action}: #{inspect(reason)}")
     :ok
   end
-
-  defp log_run_store_error(_other, _action), do: :ok
 
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
@@ -1536,8 +1532,6 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> existing
     end
   end
-
-  defp transcript_path_for_update(existing, _update), do: existing
 
   defp turn_count_for_update(existing_count, existing_session_id, %{
          event: :session_started,
