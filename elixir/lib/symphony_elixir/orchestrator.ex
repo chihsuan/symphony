@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, RunStore, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, RunStore, StatusDashboard, Tracker, URLUtils, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -42,7 +42,11 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      budget_day_started_on: nil,
+      budget_daily_used: 0,
+      budget_daily_paused_logged: false,
+      budget_exhausted: MapSet.new()
     ]
   end
 
@@ -59,6 +63,9 @@ defmodule SymphonyElixir.Orchestrator do
     :ok = ensure_run_store_started()
     {retry_attempts, claimed} = hydrate_retry_attempts()
     codex_totals = persisted_codex_totals()
+    budget_day_started_on = Date.utc_today()
+    budget_daily_used = hydrate_budget_daily_used(budget_day_started_on)
+    budget_exhausted = hydrate_budget_exhausted()
 
     completed_run_metadata = hydrate_completed_run_metadata(retry_attempts)
 
@@ -73,7 +80,11 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: retry_attempts,
       completed_run_metadata: completed_run_metadata,
       codex_totals: codex_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      budget_day_started_on: budget_day_started_on,
+      budget_daily_used: budget_daily_used,
+      budget_daily_paused_logged: false,
+      budget_exhausted: budget_exhausted
     }
 
     mark_interrupted_runs()
@@ -212,11 +223,13 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+          |> put_running_entry(issue_id, updated_running_entry)
+          |> enforce_issue_budget(issue_id)
 
         persist_running_entry(updated_running_entry)
         notify_transcript(issue_id, update)
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        {:noreply, state}
     end
   end
 
@@ -635,18 +648,32 @@ defmodule SymphonyElixir.Orchestrator do
   defp terminate_task(_pid), do: :ok
 
   defp choose_issues(issues, state) do
+    state = reset_daily_budget_if_needed(state)
+
+    if daily_budget_paused?(state) do
+      log_daily_budget_pause(state)
+    else
+      dispatch_chosen_issues(issues, state)
+    end
+  end
+
+  defp dispatch_chosen_issues(issues, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
 
     issues
     |> sort_issues_for_dispatch()
     |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
-        state_acc
-      end
+      maybe_dispatch_chosen_issue(issue, state_acc, active_states, terminal_states)
     end)
+  end
+
+  defp maybe_dispatch_chosen_issue(issue, state, active_states, terminal_states) do
+    if should_dispatch_issue?(issue, state, active_states, terminal_states) do
+      dispatch_issue(state, issue)
+    else
+      state
+    end
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -671,13 +698,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed} = state,
+         %State{running: running, claimed: claimed, budget_exhausted: budget_exhausted} = state,
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
+      !MapSet.member?(budget_exhausted, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
@@ -1312,6 +1340,7 @@ defmodule SymphonyElixir.Orchestrator do
           metadata = %{
             identifier: Map.get(most_recent, :issue_identifier),
             url: nil,
+            pull_request_url: URLUtils.pull_request_url(most_recent),
             last_ran_at: Map.get(most_recent, :ended_at) || Map.get(most_recent, :started_at)
           }
 
@@ -1325,6 +1354,66 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp hydrate_completed_run_metadata(_retry_attempts), do: %{}
+
+  defp hydrate_budget_daily_used(%Date{} = day) do
+    case RunStore.list_runs(:all) do
+      runs when is_list(runs) ->
+        runs
+        |> Enum.filter(&run_started_on_day?(&1, day))
+        |> Enum.reduce(0, fn run, total ->
+          total + run_total_tokens(run)
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Failed to hydrate daily token budget usage from run store: #{inspect(reason)}")
+        0
+    end
+  end
+
+  defp hydrate_budget_exhausted do
+    case Config.settings!().agent.max_tokens_per_issue do
+      limit when is_integer(limit) and limit > 0 ->
+        hydrate_budget_exhausted(limit)
+
+      _limit ->
+        MapSet.new()
+    end
+  end
+
+  defp hydrate_budget_exhausted(limit) do
+    case RunStore.list_runs(:all) do
+      runs when is_list(runs) ->
+        runs
+        |> Enum.flat_map(&budget_exhausted_issue_id(&1, limit))
+        |> MapSet.new()
+
+      {:error, reason} ->
+        Logger.warning("Failed to hydrate budget-exhausted issues from run store: #{inspect(reason)}")
+        MapSet.new()
+    end
+  end
+
+  defp budget_exhausted_issue_id(%{status: "budget_exhausted", issue_id: issue_id} = run, limit)
+       when is_binary(issue_id),
+       do: if(budget_exhausted_run_over_limit?(run, limit), do: [issue_id], else: [])
+
+  defp budget_exhausted_issue_id(_run, _limit), do: []
+
+  defp budget_exhausted_run_over_limit?(%{tokens: %{total_tokens: total}}, limit)
+       when is_integer(total) do
+    max(total, 0) >= limit
+  end
+
+  defp budget_exhausted_run_over_limit?(_run, _limit), do: true
+
+  defp run_started_on_day?(%{started_at: %DateTime{} = started_at}, %Date{} = day) do
+    DateTime.to_date(started_at) == day
+  end
+
+  defp run_started_on_day?(_run, _day), do: false
+
+  defp run_total_tokens(%{tokens: %{total_tokens: total}}) when is_integer(total), do: max(total, 0)
+  defp run_total_tokens(_run), do: 0
 
   defp retry_due_delay_ms(%DateTime{} = due_at, %DateTime{} = now) do
     max(0, DateTime.diff(due_at, now, :millisecond))
@@ -1462,11 +1551,14 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: 0,
       last_event: Map.get(running_entry, :last_codex_event),
       last_event_at: Map.get(running_entry, :last_codex_timestamp),
+      pull_request_url: URLUtils.pull_request_url(running_entry) || URLUtils.pull_request_url(issue),
       updated_at: now
     }
   end
 
   defp run_update_from_entry(running_entry) when is_map(running_entry) do
+    issue = Map.get(running_entry, :issue)
+
     %{
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
@@ -1478,6 +1570,7 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: running_seconds(Map.get(running_entry, :started_at), DateTime.utc_now()),
       last_event: Map.get(running_entry, :last_codex_event),
       last_event_at: Map.get(running_entry, :last_codex_timestamp),
+      pull_request_url: URLUtils.pull_request_url(running_entry) || URLUtils.pull_request_url(issue),
       updated_at: DateTime.utc_now()
     }
   end
@@ -1559,6 +1652,7 @@ defmodule SymphonyElixir.Orchestrator do
           issue_id: issue_id,
           identifier: metadata.identifier,
           state: metadata.issue.state,
+          url: issue_url(metadata.issue),
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: Map.get(metadata, :session_id),
@@ -1601,7 +1695,8 @@ defmodule SymphonyElixir.Orchestrator do
           issue_id: issue_id,
           identifier: Map.get(watching_entry, :identifier),
           state: Map.get(watching_entry, :state),
-          url: Map.get(watching_entry, :url),
+          url: URLUtils.present_url(Map.get(watching_entry, :url)),
+          pull_request_url: URLUtils.pull_request_url(watching_entry),
           last_ran_at: last_ran_at,
           seconds_since_last_run: seconds_since(last_ran_at, now)
         }
@@ -1615,6 +1710,7 @@ defmodule SymphonyElixir.Orchestrator do
        run_history: persisted_run_history(),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
+       budget: budget_snapshot(state),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -1834,12 +1930,13 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       identifier: Map.get(running_entry, :identifier) || issue_identifier(issue),
       url: issue_url(issue),
+      pull_request_url: URLUtils.pull_request_url(running_entry) || URLUtils.pull_request_url(issue),
       last_ran_at: DateTime.utc_now()
     }
   end
 
   defp completed_run_metadata(_running_entry) do
-    %{identifier: nil, url: nil, last_ran_at: DateTime.utc_now()}
+    %{identifier: nil, url: nil, pull_request_url: nil, last_ran_at: DateTime.utc_now()}
   end
 
   defp put_watching_issue(%State{} = state, %Issue{id: issue_id} = issue) when is_binary(issue_id) do
@@ -1847,23 +1944,42 @@ defmodule SymphonyElixir.Orchestrator do
     existing = Map.get(state.watching, issue_id, %{})
 
     watching_entry = %{
-      identifier:
-        issue.identifier ||
-          Map.get(completed_metadata, :identifier) ||
-          Map.get(existing, :identifier) ||
-          issue_id,
+      identifier: watching_identifier(issue, issue_id, completed_metadata, existing),
       state: issue.state,
-      url: issue.url || Map.get(completed_metadata, :url) || Map.get(existing, :url),
-      last_ran_at:
-        Map.get(completed_metadata, :last_ran_at) ||
-          Map.get(existing, :last_ran_at) ||
-          DateTime.utc_now()
+      url: watching_url(issue, completed_metadata, existing),
+      pull_request_url: watching_pull_request_url(issue, completed_metadata, existing),
+      last_ran_at: watching_last_ran_at(completed_metadata, existing)
     }
 
     %{state | watching: Map.put(state.watching, issue_id, watching_entry)}
   end
 
   defp put_watching_issue(state, _issue), do: state
+
+  defp watching_identifier(%Issue{identifier: identifier}, issue_id, completed_metadata, existing) do
+    identifier ||
+      Map.get(completed_metadata, :identifier) ||
+      Map.get(existing, :identifier) ||
+      issue_id
+  end
+
+  defp watching_url(issue, completed_metadata, existing) do
+    issue_url(issue) ||
+      URLUtils.present_url(Map.get(completed_metadata, :url)) ||
+      URLUtils.present_url(Map.get(existing, :url))
+  end
+
+  defp watching_pull_request_url(issue, completed_metadata, existing) do
+    URLUtils.pull_request_url(issue) ||
+      URLUtils.pull_request_url(completed_metadata) ||
+      URLUtils.pull_request_url(existing)
+  end
+
+  defp watching_last_ran_at(completed_metadata, existing) do
+    Map.get(completed_metadata, :last_ran_at) ||
+      Map.get(existing, :last_ran_at) ||
+      DateTime.utc_now()
+  end
 
   defp forget_completed_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     %{
@@ -1879,7 +1995,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_identifier(%Issue{identifier: identifier}), do: identifier
   defp issue_identifier(_issue), do: nil
 
-  defp issue_url(%Issue{url: url}), do: url
+  defp issue_url(%Issue{url: url}), do: URLUtils.present_url(url)
   defp issue_url(_issue), do: nil
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
@@ -1904,6 +2020,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()
+    state = reset_daily_budget_if_needed(state)
 
     %{
       state
@@ -1911,6 +2028,63 @@ defmodule SymphonyElixir.Orchestrator do
         max_concurrent_agents: config.agent.max_concurrent_agents
     }
   end
+
+  defp reset_daily_budget_if_needed(%State{} = state) do
+    today = Date.utc_today()
+
+    case state.budget_day_started_on do
+      ^today ->
+        state
+
+      nil ->
+        %{state | budget_day_started_on: today, budget_daily_used: 0, budget_daily_paused_logged: false}
+
+      previous_day ->
+        Logger.info("Resetting daily token budget previous_day=#{Date.to_iso8601(previous_day)} previous_daily_used=#{state.budget_daily_used}")
+
+        %{state | budget_day_started_on: today, budget_daily_used: 0, budget_daily_paused_logged: false}
+    end
+  end
+
+  defp daily_budget_paused?(%State{} = state) do
+    case Config.settings!().agent.max_tokens_per_day do
+      limit when is_integer(limit) and limit > 0 -> state.budget_daily_used >= limit
+      _ -> false
+    end
+  end
+
+  defp log_daily_budget_pause(%State{budget_daily_paused_logged: true} = state), do: state
+
+  defp log_daily_budget_pause(%State{} = state) do
+    case Config.settings!().agent.max_tokens_per_day do
+      limit when is_integer(limit) and limit > 0 and state.budget_daily_used >= limit ->
+        Logger.warning("Daily token budget exhausted daily_used=#{state.budget_daily_used} daily_limit=#{limit} day_started_on=#{Date.to_iso8601(state.budget_day_started_on)}; pausing new dispatch")
+        %{state | budget_daily_paused_logged: true}
+
+      _ ->
+        state
+    end
+  end
+
+  defp budget_snapshot(%State{} = state) do
+    agent = Config.settings!().agent
+    daily_limit = agent.max_tokens_per_day
+    daily_used = max(state.budget_daily_used || 0, 0)
+
+    %{
+      per_issue_limit: agent.max_tokens_per_issue,
+      daily_limit: daily_limit,
+      daily_used: daily_used,
+      daily_remaining: budget_remaining(daily_limit, daily_used),
+      daily_paused: daily_budget_paused?(state)
+    }
+  end
+
+  defp budget_remaining(limit, used) when is_integer(limit) and limit > 0 do
+    max(limit - used, 0)
+  end
+
+  defp budget_remaining(_limit, _used), do: nil
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
@@ -1921,14 +2095,70 @@ defmodule SymphonyElixir.Orchestrator do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
 
+  defp put_running_entry(%State{} = state, issue_id, running_entry)
+       when is_binary(issue_id) and is_map(running_entry) do
+    %{state | running: Map.put(state.running, issue_id, running_entry)}
+  end
+
+  defp put_running_entry(state, _issue_id, _running_entry), do: state
+
+  defp enforce_issue_budget(%State{} = state, issue_id) when is_binary(issue_id) do
+    limit = Config.settings!().agent.max_tokens_per_issue
+    running_entry = Map.get(state.running, issue_id)
+    total_tokens = running_entry_total_tokens(running_entry)
+
+    if is_integer(limit) and limit > 0 and total_tokens >= limit do
+      log_issue_budget_exhausted(issue_id, running_entry, limit, total_tokens)
+
+      state
+      |> terminate_running_issue(issue_id, false,
+        status: "budget_exhausted",
+        error: "token budget exhausted: total_tokens=#{total_tokens} limit=#{limit}"
+      )
+      |> mark_budget_exhausted(issue_id)
+    else
+      state
+    end
+  end
+
+  defp enforce_issue_budget(state, _issue_id), do: state
+
+  defp running_entry_total_tokens(running_entry) when is_map(running_entry) do
+    Map.get(running_entry, :codex_total_tokens, 0)
+  end
+
+  defp running_entry_total_tokens(_running_entry), do: 0
+
+  defp log_issue_budget_exhausted(issue_id, running_entry, limit, total_tokens) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    session_id = running_entry_session_id(running_entry)
+    input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
+    output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
+
+    Logger.warning(
+      "Issue token budget exhausted: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} input_tokens=#{input_tokens} output_tokens=#{output_tokens} total_tokens=#{total_tokens} limit=#{limit}; stopping active agent without retry"
+    )
+  end
+
+  defp mark_budget_exhausted(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{state | budget_exhausted: MapSet.put(state.budget_exhausted, issue_id)}
+  end
+
   defp apply_codex_token_delta(
          %{codex_totals: codex_totals} = state,
          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
        )
        when is_integer(input) and is_integer(output) and is_integer(total) do
+    state = reset_daily_budget_if_needed(state)
     codex_totals = apply_token_delta(codex_totals, token_delta)
     persist_codex_totals(codex_totals)
-    %{state | codex_totals: codex_totals}
+
+    %{
+      state
+      | codex_totals: codex_totals,
+        budget_daily_used: state.budget_daily_used + max(total, 0)
+    }
+    |> log_daily_budget_pause()
   end
 
   defp apply_codex_token_delta(state, _token_delta), do: state

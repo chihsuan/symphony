@@ -195,6 +195,7 @@ Examples:
 - workspace root
 - active and terminal issue states
 - concurrency limits
+- optional per-issue and per-day token budget limits
 - coding-agent executable/args/timeouts
 - workspace hooks
 
@@ -274,6 +275,9 @@ Fields:
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `codex_totals` (aggregate tokens + runtime seconds)
 - `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `budget_day_started_on` (UTC date used for daily token budget accounting)
+- `budget_daily_used` (tokens counted toward the current UTC day budget)
+- `budget_exhausted` (set of issue IDs stopped by per-issue budget enforcement)
 
 #### 4.1.9 Durable Run Store
 
@@ -287,6 +291,7 @@ the durable store SHOULD record:
 - per-run token totals and runtime seconds
 - retry queue rows with issue ID, attempt, due time, error, worker host, and workspace path
 - aggregate token/runtime totals
+- budget-exhausted run status for issues stopped without retry by token budget enforcement
 
 Live scheduler state still owns dispatch decisions. Durable records are used for restart recovery
 and observability, not as a second concurrent scheduler.
@@ -1490,7 +1495,29 @@ Rate-limit tracking:
 - Track the latest rate-limit payload seen in any agent update.
 - Any human-readable presentation of rate-limit data is implementation-defined.
 
-### 13.6 Humanized Agent Event Summaries (OPTIONAL)
+### 13.6 Token Budget Guardrails (OPTIONAL)
+
+Implementations MAY support optional token budget limits in `WORKFLOW.md`:
+
+- `agent.max_tokens_per_issue` (positive integer, OPTIONAL)
+  - When omitted, no per-issue token budget is enforced.
+  - When configured, an active agent whose cumulative issue token total reaches the limit SHOULD be
+    stopped without scheduling a retry.
+  - The run SHOULD be recorded with an implementation-defined budget-exhausted status and enough
+    issue/session/token context for operators to understand why it stopped.
+  - Implementations MAY rehydrate budget-exhausted status across restarts to avoid redispatching the
+    same over-budget issue. If they do, they SHOULD ignore persisted budget-exhausted records when
+    the per-issue limit is no longer configured or is raised above the recorded token total.
+- `agent.max_tokens_per_day` (positive integer, OPTIONAL)
+  - When omitted, no daily dispatch budget is enforced.
+  - When configured, new dispatch SHOULD pause once the UTC-day token total reaches the limit.
+  - Already-running agents SHOULD continue; the daily guardrail only gates new dispatch.
+  - Daily usage SHOULD reset at the UTC day boundary.
+
+Token budget enforcement depends on coding-agent token reporting. Implementations SHOULD warn, not
+error, when a configured budget may not be enforceable with the configured coding-agent command.
+
+### 13.7 Humanized Agent Event Summaries (OPTIONAL)
 
 Humanized summaries of raw agent protocol events are OPTIONAL.
 
@@ -1499,7 +1526,7 @@ If implemented:
 - Treat them as observability-only output.
 - Do not make orchestrator logic depend on humanized strings.
 
-### 13.7 OPTIONAL HTTP Server Extension
+### 13.8 OPTIONAL HTTP Server Extension
 
 This section defines an OPTIONAL HTTP interface for observability and operational control.
 
@@ -1513,12 +1540,13 @@ If implemented:
 Extension config:
 
 - `server.port` (integer, OPTIONAL)
-  - Enables the HTTP server extension.
+  - Enables or pins the HTTP server extension, depending on implementation defaults.
   - `0` requests an ephemeral port for local development and tests.
   - CLI `--port` overrides `server.port` when both are present.
 
 Enablement (extension):
 
+- Implementations MAY start the HTTP server by default.
 - Start the HTTP server when a CLI `--port` argument is provided.
 - Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
 - The `server` top-level key is owned by this extension.
@@ -1528,7 +1556,7 @@ Enablement (extension):
 - Changes to HTTP listener settings (for example `server.port`) do not need to hot-rebind;
   restart-required behavior is conformant.
 
-#### 13.7.1 Human-Readable Dashboard (`/`)
+#### 13.8.1 Human-Readable Dashboard (`/`)
 
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
@@ -1536,7 +1564,7 @@ Enablement (extension):
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 
-#### 13.7.2 JSON REST API (`/api/v1/*`)
+#### 13.8.2 JSON REST API (`/api/v1/*`)
 
 Provide a JSON REST API under `/api/v1/*` for current runtime state and operational debugging.
 
@@ -1615,6 +1643,13 @@ Minimum endpoints:
         "output_tokens": 2400,
         "total_tokens": 7400,
         "seconds_running": 1834.2
+      },
+      "budget": {
+        "per_issue_limit": 500000,
+        "daily_limit": 5000000,
+        "daily_used": 1230000,
+        "daily_remaining": 3770000,
+        "daily_paused": false
       },
       "rate_limits": null
     }
@@ -2348,7 +2383,7 @@ Use the same validation profiles as Section 17:
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
-  exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
+  exposes the baseline endpoints/error semantics in Section 13.8 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
 - Durable run store extension persists retry queue rows, run history, session metadata, and aggregate

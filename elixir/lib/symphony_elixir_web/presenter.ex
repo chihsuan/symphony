@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard, URLUtils}
 
   @empty_codex_totals %{
     input_tokens: 0,
@@ -30,6 +30,7 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           run_history: Enum.map(Map.get(snapshot, :run_history, []), &run_history_payload/1),
           codex_totals: normalize_codex_totals(Map.get(snapshot, :codex_totals)),
+          budget: normalize_budget(Map.get(snapshot, :budget)),
           rate_limits: snapshot.rate_limits
         }
 
@@ -152,6 +153,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       state: entry.state,
+      url: URLUtils.present_url(Map.get(entry, :url)),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
@@ -174,7 +176,8 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       state: entry.state,
-      url: entry.url,
+      url: URLUtils.present_url(Map.get(entry, :url)),
+      pull_request_url: URLUtils.pull_request_url(entry),
       last_ran_at: iso8601(entry.last_ran_at),
       seconds_since_last_run: entry.seconds_since_last_run
     }
@@ -225,7 +228,8 @@ defmodule SymphonyElixirWeb.Presenter do
   defp watching_issue_payload(watching) do
     %{
       state: watching.state,
-      url: watching.url,
+      url: URLUtils.present_url(watching.url),
+      pull_request_url: URLUtils.pull_request_url(watching),
       last_ran_at: iso8601(watching.last_ran_at),
       seconds_since_last_run: watching.seconds_since_last_run
     }
@@ -258,6 +262,26 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp normalize_codex_totals(_totals), do: @empty_codex_totals
+
+  defp normalize_budget(budget) when is_map(budget) do
+    %{
+      per_issue_limit: Map.get(budget, :per_issue_limit),
+      daily_limit: Map.get(budget, :daily_limit),
+      daily_used: Map.get(budget, :daily_used, 0),
+      daily_remaining: Map.get(budget, :daily_remaining),
+      daily_paused: Map.get(budget, :daily_paused, false)
+    }
+  end
+
+  defp normalize_budget(_budget) do
+    %{
+      per_issue_limit: nil,
+      daily_limit: nil,
+      daily_used: 0,
+      daily_remaining: nil,
+      daily_paused: false
+    }
+  end
 
   defp workspace_payload(issue_identifier, running, retry) do
     if running || retry do

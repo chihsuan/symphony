@@ -78,37 +78,49 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </p>
         </section>
       <% else %>
-        <section class="metric-grid">
+        <section class="metric-grid dashboard-metrics">
           <article class="metric-card">
             <p class="metric-label">Running</p>
             <p class="metric-value numeric"><%= @payload.counts.running %></p>
-            <p class="metric-detail">Active issue sessions in the current runtime.</p>
+            <p class="metric-detail">active</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Watching</p>
             <p class="metric-value numeric"><%= @payload.counts.watching %></p>
-            <p class="metric-detail">Recently handled issues waiting outside active states.</p>
+            <p class="metric-detail">waiting</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Retrying</p>
             <p class="metric-value numeric"><%= @payload.counts.retrying %></p>
-            <p class="metric-detail">Issues waiting for the next retry window.</p>
+            <p class="metric-detail">backoff</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Total tokens</p>
-            <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
+            <p class="metric-value numeric"><%= format_compact_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
-              In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
+              <%= format_compact_int(@payload.codex_totals.input_tokens) %> in / <%= format_compact_int(@payload.codex_totals.output_tokens) %> out
             </p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Daily tokens</p>
+            <p class="metric-value numeric"><%= format_budget_usage(@payload.budget.daily_used, @payload.budget.daily_limit) %></p>
+            <p class="metric-detail"><%= daily_budget_detail(@payload.budget) %></p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Issue budget</p>
+            <p class="metric-value numeric"><%= format_budget_limit(@payload.budget.per_issue_limit) %></p>
+            <p class="metric-detail">per issue</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-            <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+            <p class="metric-detail">completed + active</p>
           </article>
         </section>
 
@@ -137,11 +149,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div class="table-wrap">
               <table class="data-table data-table-running">
                 <colgroup>
-                  <col style="width: 12rem;" />
+                  <col style="width: 10rem;" />
                   <col style="width: 8rem;" />
                   <col style="width: 7.5rem;" />
                   <col style="width: 8.5rem;" />
                   <col />
+                  <col style="width: 10rem;" />
                   <col style="width: 10rem;" />
                 </colgroup>
                 <thead>
@@ -152,17 +165,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
                     <th>Tokens</th>
+                    <th>Links</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr :for={entry <- @payload.running}>
                     <td>
                       <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <div class="issue-actions">
-                          <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
-                          <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
-                        </div>
+                        <%= if entry.url do %>
+                          <a class="issue-id" href={entry.url} target="_blank" rel="noreferrer"><%= entry.issue_identifier %></a>
+                        <% else %>
+                          <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <% end %>
                       </div>
                     </td>
                     <td>
@@ -176,6 +190,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <button
                             type="button"
                             class="subtle-button session-copy-btn"
+                            aria-label="Copy ID"
                             data-label={String.slice(entry.session_id, 0, 8) <> "…"}
                             data-copy={entry.session_id}
                             title={entry.session_id}
@@ -208,6 +223,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
                       </div>
                     </td>
+                    <td class="links-cell">
+                      <div class="link-actions">
+                        <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
+                        <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                      </div>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -232,7 +253,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <col style="width: 12rem;" />
                   <col style="width: 9rem;" />
                   <col style="width: 9rem;" />
-                  <col />
+                  <col style="width: 13rem;" />
                 </colgroup>
                 <thead>
                   <tr>
@@ -246,11 +267,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr :for={entry <- @payload.watching}>
                     <td>
                       <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <div class="issue-actions">
-                          <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
-                          <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
-                        </div>
+                        <%= if entry.url do %>
+                          <a class="issue-id" href={entry.url} target="_blank" rel="noreferrer"><%= entry.issue_identifier %></a>
+                        <% else %>
+                          <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <% end %>
                       </div>
                     </td>
                     <td>
@@ -259,14 +280,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       </span>
                     </td>
                     <td class="numeric"><%= format_last_run(entry, @now) %></td>
-                    <td>
-                      <%= if entry.url do %>
-                        <a class="action-pill" href={entry.url} target="_blank" rel="noreferrer">
-                          Linear ↗
-                        </a>
-                      <% else %>
-                        <span class="muted">—</span>
-                      <% end %>
+                    <td class="links-cell">
+                      <div class="link-actions">
+                        <%= if entry.pull_request_url do %>
+                          <a class="action-pill" href={entry.pull_request_url} target="_blank" rel="noreferrer">PR</a>
+                        <% end %>
+                        <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
+                        <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                      </div>
                     </td>
                   </tr>
                 </tbody>
@@ -399,6 +420,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
     "#{mins}m #{secs}s"
   end
 
+  defp format_budget_usage(used, limit) when is_integer(limit) and limit > 0 do
+    "#{format_compact_int(used)} / #{format_compact_int(limit)}"
+  end
+
+  defp format_budget_usage(used, _limit), do: format_compact_int(used)
+
+  defp format_budget_limit(limit) when is_integer(limit) and limit > 0, do: format_compact_int(limit)
+  defp format_budget_limit(_limit), do: "Unlimited"
+
+  defp daily_budget_detail(%{daily_paused: true}), do: "paused"
+
+  defp daily_budget_detail(%{daily_remaining: remaining}) when is_integer(remaining) do
+    "#{format_compact_int(remaining)} left"
+  end
+
+  defp daily_budget_detail(_budget), do: "no limit"
+
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
     DateTime.diff(now, started_at, :second)
   end
@@ -421,6 +459,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_int(_value), do: "n/a"
+
+  defp format_compact_int(value) when is_integer(value) do
+    abs_value = abs(value)
+
+    cond do
+      abs_value >= 1_000_000_000 -> format_compact_number(value, 1_000_000_000, "B")
+      abs_value >= 1_000_000 -> format_compact_number(value, 1_000_000, "M")
+      abs_value >= 1_000 -> format_compact_number(value, 1_000, "K")
+      true -> Integer.to_string(value)
+    end
+  end
+
+  defp format_compact_int(_value), do: "n/a"
+
+  defp format_compact_number(value, divisor, suffix) do
+    value
+    |> Kernel./(divisor)
+    |> :erlang.float_to_binary(decimals: 1)
+    |> trim_trailing_decimal_zero()
+    |> Kernel.<>(suffix)
+  end
+
+  defp trim_trailing_decimal_zero(value) do
+    String.replace_suffix(value, ".0", "")
+  end
 
   defp state_badge_class(state) do
     base = "state-badge"
