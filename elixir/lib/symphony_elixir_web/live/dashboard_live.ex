@@ -106,6 +106,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Daily budget</p>
+            <p class="metric-value numeric"><%= format_budget_usage(@payload.budget.daily_used, @payload.budget.daily_limit) %></p>
+            <p class="metric-detail"><%= daily_budget_detail(@payload.budget) %></p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Issue budget</p>
+            <p class="metric-value numeric"><%= format_budget_limit(@payload.budget.per_issue_limit) %></p>
+            <p class="metric-detail">Per running issue token limit.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
@@ -399,6 +411,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
     secs = rem(whole_seconds, 60)
     "#{mins}m #{secs}s"
   end
+
+  defp format_budget_usage(used, limit) when is_integer(limit) and limit > 0 do
+    "#{format_int(used)} / #{format_int(limit)}"
+  end
+
+  defp format_budget_usage(used, _limit), do: "#{format_int(used)} / unlimited"
+
+  defp format_budget_limit(limit) when is_integer(limit) and limit > 0, do: format_int(limit)
+  defp format_budget_limit(_limit), do: "Unlimited"
+
+  defp daily_budget_detail(%{daily_paused: true}), do: "Paused; no new dispatch."
+
+  defp daily_budget_detail(%{daily_remaining: remaining}) when is_integer(remaining) do
+    "#{format_int(remaining)} tokens remaining today."
+  end
+
+  defp daily_budget_detail(_budget), do: "No daily limit configured."
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
     DateTime.diff(now, started_at, :second)

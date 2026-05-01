@@ -837,6 +837,288 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_total_tokens == 0
   end
 
+  test "orchestrator stops an issue that exhausts its token budget without retrying" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_issue: 10
+    )
+
+    issue_id = "issue-budget-exhausted"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BUDGET",
+      title: "Budget exhausted",
+      description: "Stop once the token budget is reached",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-BUDGET"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :IssueBudgetOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    worker_pid =
+      spawn(fn ->
+        Process.sleep(:infinity)
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    run_id = "run-budget-exhausted"
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      run_id: run_id,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-budget",
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    assert :ok =
+             RunStore.put_run(%{
+               run_id: run_id,
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               title: issue.title,
+               state: issue.state,
+               status: "running",
+               attempt: 1,
+               started_at: started_at,
+               ended_at: nil,
+               error: nil,
+               worker_host: nil,
+               workspace_path: nil,
+               session_id: "thread-budget",
+               transcript_path: nil,
+               codex_app_server_pid: nil,
+               turn_count: 0,
+               tokens: %{input_tokens: 0, output_tokens: 0, total_tokens: 0},
+               runtime_seconds: 0,
+               last_event: nil,
+               last_event_at: nil,
+               updated_at: started_at
+             })
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    warning =
+      capture_log(fn ->
+        send(
+          pid,
+          {:codex_worker_update, issue_id,
+           %{
+             event: :notification,
+             payload: %{
+               "method" => "thread/tokenUsage/updated",
+               "params" => %{
+                 "tokenUsage" => %{
+                   "total" => %{"inputTokens" => 7, "outputTokens" => 5, "totalTokens" => 12}
+                 }
+               }
+             },
+             timestamp: DateTime.utc_now()
+           }}
+        )
+
+        assert %{running: []} = wait_for_snapshot(pid, &(&1.running == []))
+      end)
+
+    assert warning =~ "Issue token budget exhausted"
+    assert warning =~ "issue_identifier=MT-BUDGET"
+
+    final_state = :sys.get_state(pid)
+    assert MapSet.member?(final_state.budget_exhausted, issue_id)
+    refute Map.has_key?(final_state.retry_attempts, issue_id)
+    refute MapSet.member?(final_state.claimed, issue_id)
+    refute Orchestrator.should_dispatch_issue_for_test(issue, final_state)
+
+    run_record = wait_for_run_record(&(&1.run_id == run_id))
+    assert run_record.status == "budget_exhausted"
+    assert run_record.error =~ "token budget exhausted"
+    assert run_record.tokens == %{input_tokens: 7, output_tokens: 5, total_tokens: 12}
+    refute Process.alive?(worker_pid)
+  end
+
+  test "orchestrator pauses new dispatch when the daily token budget is exhausted" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_day: 10,
+      max_concurrent_agents: 1
+    )
+
+    issue = %Issue{
+      id: "issue-daily-budget",
+      identifier: "MT-DAILY",
+      title: "Daily budget",
+      description: "Do not dispatch once the daily budget is gone",
+      state: "Todo",
+      url: "https://example.org/issues/MT-DAILY"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :DailyBudgetOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | budget_daily_used: 10}
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    warning =
+      capture_log(fn ->
+        send(pid, :run_poll_cycle)
+
+        assert %{running: [], budget: budget} =
+                 wait_for_snapshot(pid, fn snapshot ->
+                   snapshot.running == [] and snapshot.budget.daily_paused == true
+                 end)
+
+        assert budget.daily_used == 10
+        assert budget.daily_remaining == 0
+      end)
+
+    assert warning =~ "Daily token budget exhausted"
+    assert warning =~ "pausing new dispatch"
+  end
+
+  test "orchestrator resets daily budget accounting at UTC day boundaries" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_day: 10
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :DailyBudgetResetOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    yesterday = Date.add(Date.utc_today(), -1)
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | budget_day_started_on: yesterday,
+          budget_daily_used: 10,
+          budget_daily_paused_logged: true
+      }
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.budget.daily_used == 0
+    assert snapshot.budget.daily_remaining == 10
+    refute snapshot.budget.daily_paused
+  end
+
+  test "orchestrator rehydrates budget-exhausted issues across restarts while the limit still applies" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_issue: 10
+    )
+
+    issue_id = "issue-budget-hydrate"
+
+    assert :ok =
+             put_budget_exhausted_run(%{
+               run_id: "run-budget-hydrate",
+               issue_id: issue_id,
+               issue_identifier: "MT-BUDGET-H",
+               total_tokens: 12,
+               started_at: DateTime.add(DateTime.utc_now(), -86_400, :second)
+             })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BUDGET-H",
+      title: "Budget hydrate",
+      description: "Stay blocked after restart",
+      state: "Todo",
+      url: "https://example.org/issues/MT-BUDGET-H"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BudgetHydrateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    state = :sys.get_state(pid)
+
+    assert state.budget_daily_used == 0
+    assert MapSet.member?(state.budget_exhausted, issue_id)
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "orchestrator skips persisted budget-exhausted issues when the current limit no longer applies" do
+    issue_id = "issue-budget-raised"
+
+    assert :ok =
+             put_budget_exhausted_run(%{
+               run_id: "run-budget-raised",
+               issue_id: issue_id,
+               issue_identifier: "MT-BUDGET-R",
+               total_tokens: 12,
+               started_at: DateTime.utc_now()
+             })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_issue: 20
+    )
+
+    raised_limit_orchestrator_name = Module.concat(__MODULE__, :BudgetRaisedLimitOrchestrator)
+    {:ok, raised_limit_pid} = Orchestrator.start_link(name: raised_limit_orchestrator_name)
+
+    raised_limit_state = :sys.get_state(raised_limit_pid)
+    refute MapSet.member?(raised_limit_state.budget_exhausted, issue_id)
+
+    GenServer.stop(raised_limit_pid)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    unset_limit_orchestrator_name = Module.concat(__MODULE__, :BudgetUnsetLimitOrchestrator)
+    {:ok, unset_limit_pid} = Orchestrator.start_link(name: unset_limit_orchestrator_name)
+
+    unset_limit_state = :sys.get_state(unset_limit_pid)
+    refute MapSet.member?(unset_limit_state.budget_exhausted, issue_id)
+
+    GenServer.stop(unset_limit_pid)
+  end
+
   test "orchestrator snapshot includes retry backoff entries" do
     orchestrator_name = Module.concat(__MODULE__, :RetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1965,6 +2247,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp put_budget_exhausted_run(attrs) do
+    total_tokens = Map.fetch!(attrs, :total_tokens)
+
+    RunStore.put_run(%{
+      run_id: Map.fetch!(attrs, :run_id),
+      issue_id: Map.fetch!(attrs, :issue_id),
+      issue_identifier: Map.fetch!(attrs, :issue_identifier),
+      title: "Budget exhausted",
+      state: "Todo",
+      status: "budget_exhausted",
+      attempt: 1,
+      started_at: Map.fetch!(attrs, :started_at),
+      ended_at: DateTime.utc_now(),
+      error: "token budget exhausted",
+      tokens: %{input_tokens: total_tokens, output_tokens: 0, total_tokens: total_tokens}
+    })
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do

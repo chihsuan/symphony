@@ -1187,6 +1187,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.workspace.fetch_before_dispatch
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
+    assert config.agent.max_tokens_per_issue == nil
+    assert config.agent.max_tokens_per_day == nil
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{
@@ -1225,6 +1227,41 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.settings!().codex.command ==
              "codex --config 'model=\"gpt-5.5\"' app-server"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_tokens_per_issue: 500_000,
+      max_tokens_per_day: 5_000_000
+    )
+
+    config = Config.settings!()
+    assert config.agent.max_tokens_per_issue == 500_000
+    assert config.agent.max_tokens_per_day == 5_000_000
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_tokens_per_issue: 500_000,
+      codex_command: "codex run"
+    )
+
+    warning =
+      capture_log(fn ->
+        assert :ok = Config.validate!()
+      end)
+
+    assert warning =~ "agent.max_tokens_per_issue is configured"
+    assert warning =~ "may not report token usage"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_tokens_per_day: 5_000_000,
+      codex_command: "codex run"
+    )
+
+    warning =
+      capture_log(fn ->
+        assert :ok = Config.validate!()
+      end)
+
+    assert warning =~ "agent.max_tokens_per_day is configured"
+    assert warning =~ "may not report token usage"
 
     explicit_root =
       Path.join(
@@ -1278,6 +1315,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_tokens_per_issue: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_tokens_per_issue"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_tokens_per_day: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_tokens_per_day"
 
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()

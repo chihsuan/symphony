@@ -116,6 +116,8 @@ routing:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  # max_tokens_per_issue: 500000
+  # max_tokens_per_day: 5000000
 codex:
   command: codex app-server
   network_access:
@@ -163,6 +165,13 @@ Notes:
   field, `codex.network_access` controls that field.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.max_tokens_per_issue` and `agent.max_tokens_per_day` are optional guardrails. When omitted,
+  no token budget is enforced. The per-issue limit stops only the over-budget issue without retrying;
+  the daily limit pauses new dispatch for the UTC day while allowing already-running agents to
+  continue. Budget enforcement depends on Codex app-server token reporting, so Symphony warns if
+  either budget is configured with a command that may not report token usage. Per-issue exhausted
+  runs are rehydrated from run history across restarts while the current limit still applies; raising
+  or removing the per-issue limit lets the issue dispatch again.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

@@ -139,9 +139,42 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       true ->
-        validate_workspace_semantics(settings)
+        with :ok <- validate_workspace_semantics(settings) do
+          warn_if_budget_token_reporting_unavailable(settings)
+          :ok
+        end
     end
   end
+
+  defp warn_if_budget_token_reporting_unavailable(%Schema{} = settings) do
+    budget_keys = configured_budget_keys(settings.agent)
+
+    if budget_keys != [] and not codex_app_server_command?(settings.codex.command) do
+      Logger.warning("#{budget_warning_subject(budget_keys)} but codex.command may not report token usage command=#{inspect(settings.codex.command)}")
+    end
+
+    :ok
+  end
+
+  defp budget_warning_subject([budget_key]), do: "#{budget_key} is configured"
+  defp budget_warning_subject(budget_keys), do: "#{Enum.join(budget_keys, ", ")} are configured"
+
+  defp configured_budget_keys(agent) do
+    [
+      {"agent.max_tokens_per_issue", agent.max_tokens_per_issue},
+      {"agent.max_tokens_per_day", agent.max_tokens_per_day}
+    ]
+    |> Enum.filter(fn {_key, value} -> is_integer(value) end)
+    |> Enum.map(fn {key, _value} -> key end)
+  end
+
+  defp codex_app_server_command?(command) when is_binary(command) do
+    command
+    |> String.split()
+    |> Enum.member?("app-server")
+  end
+
+  defp codex_app_server_command?(_command), do: false
 
   defp validate_workspace_semantics(%Schema{workspace: %{strategy: "worktree"} = workspace, worker: worker}) do
     cond do
