@@ -36,6 +36,8 @@ codex:
   command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
   thread_sandbox: workspace-write
+  network_access:
+    mode: allowlist
   turn_sandbox_policy:
     type: workspaceWrite
     networkAccess: true

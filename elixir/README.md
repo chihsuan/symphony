@@ -118,6 +118,10 @@ agent:
   max_turns: 20
 codex:
   command: codex app-server
+  network_access:
+    mode: allowlist
+    allowed_domains: []
+    denied_domains: []
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -132,8 +136,17 @@ Notes:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+  - `codex.network_access.mode` defaults to `allowlist`
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
+- Supported `codex.network_access.mode` values:
+  - `allowlist`: enables the Codex sandbox network switch and sends a thread-level
+    `config.experimental_network` allow map built from Symphony's built-in dev domains plus
+    `allowed_domains` minus `denied_domains`.
+  - `open`: enables the Codex sandbox network switch without a Symphony-managed domain overlay,
+    matching the previous broad `networkAccess: true` behavior.
+  - `block`: disables the Codex sandbox network switch, matching `networkAccess: false`.
+  `denied_domains` always takes precedence over built-in and user-provided `allowed_domains`.
 - `codex.command_timeout_ms` caps a single shell command even when it keeps streaming output.
   Default: `600000` (10 minutes). Set `0` to disable this command-level guard.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony forwards the configured map to
@@ -144,7 +157,8 @@ Notes:
   update Git metadata. Symphony prepends these managed roots before any `writableRoots` already
   present in the configured policy, and deduplicates the combined list. Compatibility for the
   remaining fields still depends on the targeted Codex app-server version rather than local
-  Symphony validation.
+  Symphony validation. For known Codex policies with a boolean `networkAccess` field,
+  `codex.network_access` controls that field.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue

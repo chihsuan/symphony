@@ -284,16 +284,24 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
+  defp start_thread(port, workspace, %{
+         approval_policy: approval_policy,
+         thread_sandbox: thread_sandbox,
+         thread_config: thread_config
+       }) do
+    params =
+      %{
         "approvalPolicy" => approval_policy,
         "sandbox" => thread_sandbox,
         "cwd" => workspace,
         "dynamicTools" => DynamicTool.tool_specs()
       }
+      |> maybe_put_thread_config(thread_config)
+
+    send_message(port, %{
+      "method" => "thread/start",
+      "id" => @thread_start_id,
+      "params" => params
     })
 
     case await_response(port, @thread_start_id) do
@@ -307,6 +315,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         other
     end
   end
+
+  defp maybe_put_thread_config(params, config) when is_map(config) and map_size(config) > 0 do
+    Map.put(params, "config", config)
+  end
+
+  defp maybe_put_thread_config(params, _config), do: params
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
     send_message(port, %{

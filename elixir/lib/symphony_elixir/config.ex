@@ -25,6 +25,7 @@ defmodule SymphonyElixir.Config do
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
+          thread_config: map() | nil,
           turn_sandbox_policy: map()
         }
 
@@ -116,6 +117,7 @@ defmodule SymphonyElixir.Config do
          %{
            approval_policy: settings.codex.approval_policy,
            thread_sandbox: settings.codex.thread_sandbox,
+           thread_config: Schema.resolve_codex_thread_config(settings),
            turn_sandbox_policy: turn_sandbox_policy
          }}
       end

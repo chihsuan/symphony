@@ -13,6 +13,43 @@ defmodule SymphonyElixir.Config.Schema do
 
   @type t :: %__MODULE__{}
 
+  @codex_built_in_network_allowed_domains [
+    "api.github.com",
+    "api.linear.app",
+    "api.openai.com",
+    "auth.openai.com",
+    "bitbucket.org",
+    "codeload.github.com",
+    "chatgpt.com",
+    "crates.io",
+    "files.pythonhosted.org",
+    "github-cloud.githubusercontent.com",
+    "github-cloud.s3.amazonaws.com",
+    "github.a8c.com",
+    "github.com",
+    "gist.githubusercontent.com",
+    "hex.pm",
+    "index.crates.io",
+    "index.rubygems.org",
+    "npm.pkg.github.com",
+    "objects.githubusercontent.com",
+    "packagist.org",
+    "plugins.gradle.org",
+    "proxy.golang.org",
+    "pypi.org",
+    "raw.githubusercontent.com",
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "repo.hex.pm",
+    "repo.maven.apache.org",
+    "repo.packagist.org",
+    "rubygems.global.ssl.fastly.net",
+    "rubygems.org",
+    "services.gradle.org",
+    "static.crates.io",
+    "sum.golang.org"
+  ]
+
   defmodule StringOrMap do
     @moduledoc false
     @behaviour Ecto.Type
@@ -161,6 +198,29 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    defmodule NetworkAccess do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+      @modes ["allowlist", "open", "block"]
+
+      embedded_schema do
+        field(:mode, :string, default: "allowlist")
+        field(:allowed_domains, {:array, :string}, default: [])
+        field(:denied_domains, {:array, :string}, default: [])
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        schema
+        |> cast(attrs, [:mode, :allowed_domains, :denied_domains], empty_values: [])
+        |> validate_required([:mode])
+        |> validate_inclusion(:mode, @modes)
+      end
+    end
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
@@ -177,6 +237,7 @@ defmodule SymphonyElixir.Config.Schema do
 
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
+      embeds_one(:network_access, NetworkAccess, on_replace: :update, defaults_to_struct: true)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -205,6 +266,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:command_timeout_ms, greater_than_or_equal_to: 0)
+      |> cast_embed(:network_access, with: &NetworkAccess.changeset/2)
     end
   end
 
@@ -353,16 +415,19 @@ defmodule SymphonyElixir.Config.Schema do
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        policy
+    policy =
+      case settings.codex.turn_sandbox_policy do
+        %{} = policy ->
+          policy
 
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> expand_local_workspace_root()
-        |> default_turn_sandbox_policy()
-    end
+        _ ->
+          workspace
+          |> default_workspace_root(settings.workspace.root)
+          |> expand_local_workspace_root()
+          |> default_turn_sandbox_policy()
+      end
+
+    apply_codex_network_access(policy, codex_network_access(settings.codex.network_access))
   end
 
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
@@ -380,7 +445,50 @@ defmodule SymphonyElixir.Config.Schema do
       end
 
     with {:ok, policy} <- policy_result do
-      {:ok, ensure_workspace_write_roots(policy, settings, workspace, opts)}
+      {:ok,
+       policy
+       |> ensure_workspace_write_roots(settings, workspace, opts)
+       |> apply_codex_network_access(codex_network_access(settings.codex.network_access))}
+    end
+  end
+
+  @doc false
+  @spec codex_built_in_network_allowed_domains() :: [String.t()]
+  def codex_built_in_network_allowed_domains do
+    @codex_built_in_network_allowed_domains
+  end
+
+  @doc false
+  @spec codex_effective_network_allowed_domains(%__MODULE__{}) :: [String.t()]
+  def codex_effective_network_allowed_domains(%__MODULE__{} = settings) do
+    network_access = codex_network_access(settings.codex.network_access)
+    denied_domains = network_access.denied_domains |> normalize_domain_list() |> MapSet.new()
+
+    (@codex_built_in_network_allowed_domains ++ normalize_domain_list(network_access.allowed_domains))
+    |> normalize_domain_list()
+    |> Enum.reject(&MapSet.member?(denied_domains, &1))
+  end
+
+  @doc false
+  @spec resolve_codex_thread_config(%__MODULE__{}) :: map() | nil
+  def resolve_codex_thread_config(%__MODULE__{} = settings) do
+    case codex_network_access(settings.codex.network_access).mode do
+      "allowlist" ->
+        domains =
+          settings
+          |> codex_effective_network_allowed_domains()
+          |> Map.new(&{&1, "allow"})
+
+        %{
+          "experimental_network" => %{
+            "enabled" => true,
+            "domains" => domains,
+            "managedAllowedDomainsOnly" => true
+          }
+        }
+
+      _mode ->
+        nil
     end
   end
 
@@ -475,11 +583,23 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
+        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy),
+        network_access: normalize_network_access(settings.codex.network_access)
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
   end
+
+  defp normalize_network_access(%Codex.NetworkAccess{} = network_access) do
+    %{
+      network_access
+      | allowed_domains: normalize_domain_list(network_access.allowed_domains),
+        denied_domains: normalize_domain_list(network_access.denied_domains)
+    }
+  end
+
+  defp codex_network_access(%Codex.NetworkAccess{} = network_access), do: network_access
+  defp codex_network_access(nil), do: %Codex.NetworkAccess{}
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
@@ -554,6 +674,17 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+
+  defp normalize_domain_list(domains) when is_list(domains) do
+    domains
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(&String.downcase/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_domain_list(_domains), do: []
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
@@ -643,11 +774,30 @@ defmodule SymphonyElixir.Config.Schema do
       "type" => "workspaceWrite",
       "writableRoots" => [workspace],
       "readOnlyAccess" => %{"type" => "fullAccess"},
-      "networkAccess" => false,
+      "networkAccess" => true,
       "excludeTmpdirEnvVar" => false,
       "excludeSlashTmp" => false
     }
   end
+
+  defp apply_codex_network_access(policy, %Codex.NetworkAccess{mode: "allowlist"}) do
+    put_known_network_access(policy, true)
+  end
+
+  defp apply_codex_network_access(policy, %Codex.NetworkAccess{mode: "open"}) do
+    put_known_network_access(policy, true)
+  end
+
+  defp apply_codex_network_access(policy, %Codex.NetworkAccess{mode: "block"}) do
+    put_known_network_access(policy, false)
+  end
+
+  defp put_known_network_access(%{"type" => type} = policy, enabled)
+       when type in ["workspaceWrite", "readOnly"] do
+    Map.put(policy, "networkAccess", enabled)
+  end
+
+  defp put_known_network_access(policy, _enabled), do: policy
 
   defp default_runtime_turn_sandbox_policy(workspace_root, opts) when is_binary(workspace_root) do
     if Keyword.get(opts, :remote, false) do

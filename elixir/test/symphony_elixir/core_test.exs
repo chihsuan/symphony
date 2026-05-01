@@ -1603,7 +1603,15 @@ defmodule SymphonyElixir.CoreTest do
                    payload["method"] == "thread/start" &&
                      get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
                      get_in(payload, ["params", "sandbox"]) == "workspace-write" &&
-                     get_in(payload, ["params", "cwd"]) == canonical_workspace
+                     get_in(payload, ["params", "cwd"]) == canonical_workspace &&
+                     get_in(payload, ["params", "config", "experimental_network", "enabled"]) == true &&
+                     get_in(payload, [
+                       "params",
+                       "config",
+                       "experimental_network",
+                       "domains",
+                       "github.com"
+                     ]) == "allow"
                  end)
                else
                  false
@@ -1614,7 +1622,7 @@ defmodule SymphonyElixir.CoreTest do
         "type" => "workspaceWrite",
         "writableRoots" => [canonical_workspace, canonical_workspace_git],
         "readOnlyAccess" => %{"type" => "fullAccess"},
-        "networkAccess" => false,
+        "networkAccess" => true,
         "excludeTmpdirEnvVar" => false,
         "excludeSlashTmp" => false
       }
@@ -1843,7 +1851,8 @@ defmodule SymphonyElixir.CoreTest do
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [canonical_workspace, canonical_workspace_git, canonical_workspace_cache]
+        "writableRoots" => [canonical_workspace, canonical_workspace_git, canonical_workspace_cache],
+        "networkAccess" => true
       }
 
       assert Enum.any?(lines, fn line ->
