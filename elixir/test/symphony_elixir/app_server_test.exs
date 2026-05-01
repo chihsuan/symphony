@@ -975,7 +975,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-721"}}}'
-            printf '%s\\n' '{"id":114,"method":"mcpServer/elicitation/request","params":{"threadId":"thread-721","turnId":"turn-721","serverName":"playwright","mode":"form","_meta":null,"message":"Allow browser automation","requestedSchema":{"type":"object","properties":{"reason":{"type":"string"},"remember":{"type":"boolean","default":true}},"required":["reason"]}}}'
+            printf '%s\\n' '{"id":114,"method":"mcpServer/elicitation/request","params":{"threadId":"thread-721","turnId":"turn-721","serverName":"playwright","mode":"form","_meta":null,"message":"Allow browser automation","requestedSchema":{"type":"object","properties":{"allow":{"type":"boolean","title":"Allow browser access"},"reason":{"type":"string"},"remember":{"type":"boolean","default":true}},"required":["allow","reason"]}}}'
             ;;
           5)
             printf '%s\\n' '{"method":"turn/completed"}'
@@ -1020,6 +1020,7 @@ defmodule SymphonyElixir.AppServerTest do
 
                  payload["id"] == 114 and
                    get_in(payload, ["result", "action"]) == "accept" and
+                   get_in(payload, ["result", "content", "allow"]) == true and
                    get_in(payload, ["result", "content", "reason"]) ==
                      "This is a non-interactive session. Operator input is unavailable." and
                    get_in(payload, ["result", "content", "remember"]) == true

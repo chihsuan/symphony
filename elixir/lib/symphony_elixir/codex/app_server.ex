@@ -1049,7 +1049,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           Map.put(acc, field, field_schema["default"])
 
         MapSet.member?(required, field) ->
-          Map.put(acc, field, mcp_elicitation_field_fallback(field_schema))
+          Map.put(acc, field, mcp_elicitation_field_fallback(field, field_schema))
 
         true ->
           acc
@@ -1059,19 +1059,32 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp mcp_elicitation_form_content(_schema), do: %{}
 
-  defp mcp_elicitation_field_fallback(%{"const" => value}), do: value
+  defp mcp_elicitation_field_fallback(_field, %{"const" => value}), do: value
 
-  defp mcp_elicitation_field_fallback(%{"oneOf" => [first | _]}) when is_map(first),
-    do: mcp_elicitation_field_fallback(first)
+  defp mcp_elicitation_field_fallback(field, %{"oneOf" => [first | _]}) when is_map(first),
+    do: mcp_elicitation_field_fallback(field, first)
 
-  defp mcp_elicitation_field_fallback(%{"anyOf" => [first | _]}) when is_map(first),
-    do: mcp_elicitation_field_fallback(first)
+  defp mcp_elicitation_field_fallback(field, %{"anyOf" => [first | _]}) when is_map(first),
+    do: mcp_elicitation_field_fallback(field, first)
 
-  defp mcp_elicitation_field_fallback(%{"enum" => [first | _]}), do: first
-  defp mcp_elicitation_field_fallback(%{"type" => "boolean"}), do: false
-  defp mcp_elicitation_field_fallback(%{"type" => type}) when type in ["number", "integer"], do: 0
-  defp mcp_elicitation_field_fallback(%{"type" => "array"}), do: []
-  defp mcp_elicitation_field_fallback(_field_schema), do: @non_interactive_tool_input_answer
+  defp mcp_elicitation_field_fallback(_field, %{"enum" => [first | _]}), do: first
+
+  defp mcp_elicitation_field_fallback(field, %{"type" => "boolean"} = field_schema),
+    do: approval_boolean_field?(field, field_schema)
+
+  defp mcp_elicitation_field_fallback(_field, %{"type" => type})
+       when type in ["number", "integer"],
+       do: 0
+
+  defp mcp_elicitation_field_fallback(_field, %{"type" => "array"}), do: []
+  defp mcp_elicitation_field_fallback(_field, _field_schema), do: @non_interactive_tool_input_answer
+
+  defp approval_boolean_field?(field, field_schema) do
+    [field, field_schema["title"], field_schema["description"]]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.downcase/1)
+    |> Enum.any?(&String.contains?(&1, ["accept", "access", "allow", "approve", "authorize", "confirm", "consent"]))
+  end
 
   defp tool_request_user_input_question_id(%{"id" => question_id}) when is_binary(question_id),
     do: {:ok, question_id}
