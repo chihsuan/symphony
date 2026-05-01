@@ -1312,6 +1312,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       observability_enabled: "maybe",
       observability_refresh_ms: %{bad: true},
       observability_render_interval_ms: %{bad: true},
+      observability_transcript_buffer_size: -1,
       server_port: -1,
       server_host: 123
     )
