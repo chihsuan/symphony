@@ -839,12 +839,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp ensure_workspace_write_roots(%{"type" => "workspaceWrite"} = policy, settings, workspace, opts) do
-    prepend_roots =
-      [runtime_workspace_write_root(workspace, opts)] ++
-        workspace_git_metadata_roots(workspace, opts) ++
-        worktree_git_metadata_roots(settings, opts)
-
-    prepend_roots = Enum.reject(prepend_roots, &is_nil/1)
+    prepend_roots = managed_workspace_write_roots(settings, workspace, opts)
 
     writable_roots =
       policy
@@ -856,22 +851,70 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp ensure_workspace_write_roots(policy, _settings, _workspace, _opts), do: policy
 
-  defp runtime_workspace_write_root(workspace, opts) when is_binary(workspace) and workspace != "" do
-    runtime_writable_root(workspace, opts)
+  defp managed_workspace_write_roots(settings, workspace, opts) when is_binary(workspace) and workspace != "" do
+    discovered_git_metadata_roots = discovered_workspace_git_metadata_roots(workspace, opts)
+
+    fallback_git_metadata_roots =
+      if discovered_git_metadata_roots == [] do
+        configured_worktree_git_metadata_roots(settings, opts)
+      else
+        []
+      end
+
+    ([runtime_writable_root(workspace, opts)] ++
+       workspace_git_pointer_roots(workspace, opts) ++
+       discovered_git_metadata_roots ++
+       fallback_git_metadata_roots)
+    |> Enum.reject(&is_nil/1)
   end
 
-  defp runtime_workspace_write_root(_workspace, _opts), do: nil
+  defp managed_workspace_write_roots(_settings, _workspace, _opts), do: []
 
   # In a linked worktree, workspace/.git is a regular file (a gitdir pointer), not a directory.
-  # Including it here ensures the pointer file itself is writable; the actual metadata under
-  # repo/.git/worktrees/<name>/ is covered by worktree_git_metadata_roots/2.
-  defp workspace_git_metadata_roots(workspace, opts) when is_binary(workspace) and workspace != "" do
+  # Including it here ensures the pointer file itself is writable.
+  defp workspace_git_pointer_roots(workspace, opts) when is_binary(workspace) and workspace != "" do
     [runtime_writable_root(Path.join(workspace, ".git"), opts)]
   end
 
-  defp workspace_git_metadata_roots(_workspace, _opts), do: []
+  defp discovered_workspace_git_metadata_roots(workspace, opts) do
+    if Keyword.get(opts, :remote, false) do
+      []
+    else
+      discover_local_workspace_git_metadata_roots(workspace, opts)
+    end
+  end
 
-  defp worktree_git_metadata_roots(
+  defp discover_local_workspace_git_metadata_roots(workspace, opts) when is_binary(workspace) do
+    with git when is_binary(git) <- System.find_executable("git"),
+         true <- File.dir?(workspace) do
+      git_metadata_roots(git, workspace, ["rev-parse", "--git-dir", "--git-common-dir"], opts)
+    else
+      _result -> []
+    end
+  end
+
+  defp git_metadata_roots(git, workspace, args, opts) do
+    case System.cmd(git, ["-C", workspace | args], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.map(&expand_git_metadata_root(&1, workspace))
+        |> Enum.map(&runtime_writable_root(&1, opts))
+        |> Enum.reject(&is_nil/1)
+
+      _result ->
+        []
+    end
+  end
+
+  defp expand_git_metadata_root(root, workspace) do
+    case Path.type(root) do
+      :relative -> Path.expand(root, workspace)
+      _type -> root
+    end
+  end
+
+  defp configured_worktree_git_metadata_roots(
          %__MODULE__{workspace: %Workspace{strategy: "worktree", repo: repo}},
          opts
        )
@@ -879,7 +922,7 @@ defmodule SymphonyElixir.Config.Schema do
     [runtime_writable_root(Path.join(repo, ".git"), opts)]
   end
 
-  defp worktree_git_metadata_roots(_settings, _opts), do: []
+  defp configured_worktree_git_metadata_roots(_settings, _opts), do: []
 
   defp runtime_writable_root(path, opts) when is_binary(path) do
     if Keyword.get(opts, :remote, false) do

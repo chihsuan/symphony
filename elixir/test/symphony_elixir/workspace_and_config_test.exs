@@ -1813,6 +1813,112 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "runtime sandbox policy discovers regular clone git metadata roots" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-clone-git-roots-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      source_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-CLONE")
+
+      create_primary_repo!(source_repo)
+      File.mkdir_p!(workspace_root)
+      {_output, 0} = System.cmd("git", ["clone", source_repo, issue_workspace], stderr_to_stdout: true)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          writableRoots: ["relative/path"],
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace_git} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(issue_workspace, ".git"))
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [canonical_issue_workspace, canonical_issue_workspace_git, "relative/path"],
+               "networkAccess" => true
+             }
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime sandbox policy discovers linked worktree git metadata roots from workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-discovered-worktree-roots-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      primary_repo = Path.join(test_root, "primary")
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-DISCOVER")
+
+      create_primary_repo!(primary_repo)
+      File.mkdir_p!(workspace_root)
+      git!(primary_repo, ["worktree", "add", "-b", "auto/MT-DISCOVER", issue_workspace])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "clone",
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          writableRoots: ["relative/path"],
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      git_dir =
+        issue_workspace
+        |> git!(["rev-parse", "--path-format=absolute", "--git-dir"])
+        |> String.trim()
+
+      git_common_dir =
+        issue_workspace
+        |> git!(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        |> String.trim()
+
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace_git} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(issue_workspace, ".git"))
+
+      assert {:ok, canonical_git_dir} = SymphonyElixir.PathSafety.canonicalize(git_dir)
+      assert {:ok, canonical_git_common_dir} = SymphonyElixir.PathSafety.canonicalize(git_common_dir)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [
+                 canonical_issue_workspace,
+                 canonical_issue_workspace_git,
+                 canonical_git_dir,
+                 canonical_git_common_dir,
+                 "relative/path"
+               ],
+               "networkAccess" => true
+             }
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "runtime sandbox policy resolution adds worktree git metadata root" do
     test_root =
       Path.join(
