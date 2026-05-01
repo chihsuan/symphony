@@ -1195,6 +1195,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
 
     assert config.codex.thread_sandbox == "workspace-write"
+    assert config.codex.network_access.mode == "allowlist"
+    assert config.codex.network_access.allowed_domains == []
+    assert config.codex.network_access.denied_domains == []
 
     assert {:ok, canonical_default_workspace_root} =
              SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
@@ -1203,7 +1206,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "type" => "workspaceWrite",
              "writableRoots" => [canonical_default_workspace_root],
              "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
+             "networkAccess" => true,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
@@ -1260,7 +1263,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                canonical_explicit_workspace,
                canonical_explicit_workspace_git,
                canonical_explicit_cache
-             ]
+             ],
+             "networkAccess" => true
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
@@ -1580,7 +1584,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Schema.resolve_turn_sandbox_policy(%Schema{
              codex: %Codex{turn_sandbox_policy: explicit_policy},
              workspace: %Schema.Workspace{root: "/tmp/ignored"}
-           }) == explicit_policy
+           }) == Map.put(explicit_policy, "networkAccess", true)
 
     assert Schema.resolve_turn_sandbox_policy(%Schema{
              codex: %Codex{turn_sandbox_policy: nil},
@@ -1589,7 +1593,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand(Path.join(System.tmp_dir!(), "symphony_workspaces"))],
              "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
+             "networkAccess" => true,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
@@ -1604,7 +1608,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand("/tmp/workspace")],
              "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
+             "networkAccess" => true,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
@@ -1623,7 +1627,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "type" => "workspaceWrite",
              "writableRoots" => [Path.expand("~/.symphony-workspaces")],
              "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
+             "networkAccess" => true,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
@@ -1635,10 +1639,104 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "type" => "workspaceWrite",
              "writableRoots" => ["~/.symphony-workspaces"],
              "readOnlyAccess" => %{"type" => "fullAccess"},
-             "networkAccess" => false,
+             "networkAccess" => true,
              "excludeTmpdirEnvVar" => false,
              "excludeSlashTmp" => false
            }
+  end
+
+  test "schema resolves codex network allowlist config" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               codex: %{
+                 network_access: %{
+                   mode: "allowlist",
+                   allowed_domains: ["API.MyCompany.com", " registry.npmjs.org "],
+                   denied_domains: ["REGISTRY.NPMJS.ORG", "api.github.com"]
+                 }
+               }
+             })
+
+    built_in_domains = Schema.codex_built_in_network_allowed_domains()
+    assert "github.com" in built_in_domains
+    assert "registry.npmjs.org" in built_in_domains
+
+    assert settings.codex.network_access.mode == "allowlist"
+    assert settings.codex.network_access.allowed_domains == ["api.mycompany.com", "registry.npmjs.org"]
+    assert settings.codex.network_access.denied_domains == ["registry.npmjs.org", "api.github.com"]
+
+    effective_domains = Schema.codex_effective_network_allowed_domains(settings)
+    assert "github.com" in effective_domains
+    assert "api.mycompany.com" in effective_domains
+    refute "api.github.com" in effective_domains
+    refute "registry.npmjs.org" in effective_domains
+
+    thread_config = Schema.resolve_codex_thread_config(settings)
+    experimental_network = thread_config["experimental_network"]
+
+    assert experimental_network["enabled"] == true
+    assert experimental_network["managedAllowedDomainsOnly"] == true
+    assert experimental_network["domains"]["github.com"] == "allow"
+    assert experimental_network["domains"]["api.mycompany.com"] == "allow"
+    refute Map.has_key?(experimental_network["domains"], "api.github.com")
+    refute Map.has_key?(experimental_network["domains"], "registry.npmjs.org")
+  end
+
+  test "schema maps codex network modes to sandbox policy and thread config" do
+    assert {:ok, block_settings} =
+             Schema.parse(%{
+               codex: %{
+                 network_access: %{mode: "block"},
+                 turn_sandbox_policy: %{type: "workspaceWrite", networkAccess: true}
+               }
+             })
+
+    assert Schema.resolve_turn_sandbox_policy(block_settings)["networkAccess"] == false
+    assert Schema.resolve_codex_thread_config(block_settings) == nil
+
+    assert {:ok, open_settings} =
+             Schema.parse(%{
+               codex: %{
+                 network_access: %{mode: "open"},
+                 turn_sandbox_policy: %{type: "workspaceWrite", networkAccess: false}
+               }
+             })
+
+    assert Schema.resolve_turn_sandbox_policy(open_settings)["networkAccess"] == true
+    assert Schema.resolve_codex_thread_config(open_settings) == nil
+  end
+
+  test "schema network helpers tolerate missing embedded network config" do
+    settings = %Schema{
+      codex: %Codex{network_access: nil},
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert "github.com" in Schema.codex_effective_network_allowed_domains(settings)
+    assert get_in(Schema.resolve_codex_thread_config(settings), ["experimental_network", "domains", "github.com"]) == "allow"
+
+    nil_domains_settings = %Schema{
+      codex: %Codex{
+        network_access: %Codex.NetworkAccess{allowed_domains: nil, denied_domains: nil}
+      },
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert Schema.codex_effective_network_allowed_domains(nil_domains_settings) ==
+             Schema.codex_built_in_network_allowed_domains()
+  end
+
+  test "runtime sandbox policy keeps workspaceWrite policy rootless when no workspace is available" do
+    settings = %Schema{
+      codex: %Codex{
+        network_access: %Codex.NetworkAccess{mode: "block"},
+        turn_sandbox_policy: %{"type" => "workspaceWrite", "writableRoots" => []}
+      },
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert {:ok, policy} = Schema.resolve_runtime_turn_sandbox_policy(settings, nil)
+    assert policy == %{"type" => "workspaceWrite", "writableRoots" => [], "networkAccess" => false}
   end
 
   test "runtime sandbox policy resolution keeps clone workspace writable with explicit roots" do
@@ -1756,7 +1854,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "type" => "workspaceWrite",
                "writableRoots" => [canonical_issue_workspace, canonical_issue_workspace_git, canonical_repo_git],
                "readOnlyAccess" => %{"type" => "fullAccess"},
-               "networkAccess" => false,
+               "networkAccess" => true,
                "excludeTmpdirEnvVar" => false,
                "excludeSlashTmp" => false
              }
@@ -1796,6 +1894,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       workspace_root = Path.join(test_root, "workspaces")
       issue_workspace = Path.join(workspace_root, "MT-NS")
+      invalid_root = Path.join(System.tmp_dir!(), String.duplicate("a", 300))
       File.mkdir_p!(issue_workspace)
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1807,7 +1906,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
             settings.codex
             | turn_sandbox_policy: %{
                 "type" => "workspaceWrite",
-                "writableRoots" => ["relative/path", 8080, %{"nested" => true}]
+                "writableRoots" => ["relative/path", invalid_root, 8080, %{"nested" => true}]
               }
           }
       }
@@ -1822,6 +1921,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                Schema.resolve_runtime_turn_sandbox_policy(policy_settings, issue_workspace)
 
       assert policy["writableRoots"] == [canonical_workspace, canonical_workspace_git, "relative/path"]
+
+      non_list_policy_settings = %{
+        settings
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{
+                "type" => "workspaceWrite",
+                "writableRoots" => "relative/path"
+              }
+          }
+      }
+
+      assert {:ok, non_list_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(non_list_policy_settings, issue_workspace)
+
+      assert non_list_policy["writableRoots"] == [canonical_workspace, canonical_workspace_git]
     after
       File.rm_rf(test_root)
     end

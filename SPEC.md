@@ -519,6 +519,17 @@ fields locally if they want stricter startup checks.
     commit, and push operations: always the issue workspace `.git` path (when a workspace path
     is available), and for linked worktree workspace strategies, also the primary clone `.git`
     metadata root.
+- `network_access` (object)
+  - Default `mode`: `allowlist`.
+  - `mode`: one of `allowlist`, `open`, or `block`.
+    - `allowlist`: network is denied by default and implementations MUST pass the effective
+      allowed-domain list through the targeted Codex app-server domain-level network mechanism.
+    - `open`: unrestricted outbound network, matching legacy `networkAccess: true` behavior.
+    - `block`: no outbound network, matching legacy `networkAccess: false` behavior.
+  - `allowed_domains`: additional domains appended to the implementation's built-in allowlist.
+  - `denied_domains`: domains removed from both the built-in allowlist and `allowed_domains`.
+  - Effective allowlist: `built_in_allowed_domains + allowed_domains - denied_domains`.
+  - `denied_domains` MUST take precedence over both built-in and user-provided domains.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `read_timeout_ms` (integer)
@@ -672,6 +683,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
+- `codex.network_access.mode`: `allowlist`, `open`, or `block`, default `allowlist`
+- `codex.network_access.allowed_domains`: list of additional allowed domains, default `[]`
+- `codex.network_access.denied_domains`: list of domains removed from the effective allowlist, default `[]`
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`

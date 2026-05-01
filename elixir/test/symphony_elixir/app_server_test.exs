@@ -1385,7 +1385,7 @@ defmodule SymphonyElixir.AppServerTest do
         "type" => "workspaceWrite",
         "writableRoots" => [remote_workspace, "#{remote_workspace}/.git"],
         "readOnlyAccess" => %{"type" => "fullAccess"},
-        "networkAccess" => false,
+        "networkAccess" => true,
         "excludeTmpdirEnvVar" => false,
         "excludeSlashTmp" => false
       }
@@ -1397,7 +1397,15 @@ defmodule SymphonyElixir.AppServerTest do
                  |> Jason.decode!()
                  |> then(fn payload ->
                    payload["method"] == "thread/start" &&
-                     get_in(payload, ["params", "cwd"]) == remote_workspace
+                     get_in(payload, ["params", "cwd"]) == remote_workspace &&
+                     get_in(payload, ["params", "config", "experimental_network", "enabled"]) == true &&
+                     get_in(payload, [
+                       "params",
+                       "config",
+                       "experimental_network",
+                       "domains",
+                       "github.com"
+                     ]) == "allow"
                  end)
                else
                  false
