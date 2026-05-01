@@ -134,6 +134,8 @@ Notes:
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
+- `codex.command_timeout_ms` caps a single shell command even when it keeps streaming output.
+  Default: `600000` (10 minutes). Set `0` to disable this command-level guard.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony forwards the configured map to
   Codex, but for `workspaceWrite` policies it ensures the current issue workspace stays in
   `writableRoots` at runtime when a workspace path is available. Symphony always includes the
