@@ -148,13 +148,13 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
              identifier: "MT-901",
              state: "In Review",
              seconds_since_last_run: 7_200,
-             url: "https://linear.app/a8c/issue/MT-901"
+             url: "https://linear.app/example/issue/MT-901"
            }),
            watching_entry(%{
              identifier: "MT-902",
              state: "Human Review",
              seconds_since_last_run: 2_700,
-             url: "https://linear.app/a8c/issue/MT-902"
+             url: "https://linear.app/example/issue/MT-902"
            })
          ],
          retrying: [],
@@ -262,7 +262,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
         identifier: "MT-000",
         state: "In Review",
         seconds_since_last_run: 60,
-        url: "https://linear.app/a8c/issue/MT-000"
+        url: "https://linear.app/example/issue/MT-000"
       },
       overrides
     )

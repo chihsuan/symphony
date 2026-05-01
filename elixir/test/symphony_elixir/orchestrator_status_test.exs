@@ -1765,7 +1765,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              identifier: "MT-PR",
              state: "In Review",
              seconds_since_last_run: 60,
-             url: "https://linear.app/a8c/issue/MT-PR",
+             url: "https://linear.app/example/issue/MT-PR",
              pull_request_url: "https://github.com/example/repo/pull/42"
            }
          ],
@@ -1779,7 +1779,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert plain =~ "PR / LINEAR URL"
     assert plain =~ "https://github.com/example/repo/pull/42"
-    refute plain =~ "https://linear.app/a8c/issue/MT-PR"
+    refute plain =~ "https://linear.app/example/issue/MT-PR"
   end
 
   test "status dashboard adds a spacer line before backoff queue when agents are active" do
