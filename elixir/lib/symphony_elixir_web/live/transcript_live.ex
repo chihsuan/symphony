@@ -24,10 +24,7 @@ defmodule SymphonyElixirWeb.TranscriptLive do
     socket =
       case payload do
         {:ok, payload} ->
-          entries =
-            payload.events
-            |> Enum.with_index(1)
-            |> Enum.map(fn {event, index} -> transcript_entry(event, index) end)
+          {entries, last_agent_text_entry, next_seq} = coalesce_entries(payload.events)
 
           socket
           |> assign(:error, nil)
@@ -35,7 +32,8 @@ defmodule SymphonyElixirWeb.TranscriptLive do
           |> assign(:issue_id, payload.issue_id)
           |> assign(:issue_identifier, payload.issue_identifier)
           |> assign(:event_count, length(entries))
-          |> assign(:next_sequence, length(entries) + 1)
+          |> assign(:next_sequence, next_seq)
+          |> assign(:last_agent_text_entry, last_agent_text_entry)
           |> stream(:events, entries)
 
         {:error, reason} ->
@@ -46,6 +44,7 @@ defmodule SymphonyElixirWeb.TranscriptLive do
           |> assign(:issue_identifier, issue_identifier)
           |> assign(:event_count, 0)
           |> assign(:next_sequence, 1)
+          |> assign(:last_agent_text_entry, nil)
           |> stream(:events, [])
       end
 
@@ -58,14 +57,29 @@ defmodule SymphonyElixirWeb.TranscriptLive do
 
   @impl true
   def handle_info({:transcript_event, event}, socket) when is_map(event) do
-    sequence = socket.assigns.next_sequence
-    entry = transcript_entry(event, sequence)
+    kind = event_kind(event)
+    last = socket.assigns.last_agent_text_entry
 
-    {:noreply,
-     socket
-     |> assign(:event_count, socket.assigns.event_count + 1)
-     |> assign(:next_sequence, sequence + 1)
-     |> stream_insert(:events, entry)}
+    if kind == "agent-text" and not is_nil(last) do
+      new_text = agent_text(event) || ""
+      merged = %{last | summary: last.summary <> new_text}
+
+      {:noreply,
+       socket
+       |> assign(:last_agent_text_entry, merged)
+       |> stream_insert(:events, merged)}
+    else
+      sequence = socket.assigns.next_sequence
+      entry = transcript_entry(event, sequence)
+      last_agent = if kind == "agent-text", do: entry, else: nil
+
+      {:noreply,
+       socket
+       |> assign(:event_count, socket.assigns.event_count + 1)
+       |> assign(:next_sequence, sequence + 1)
+       |> assign(:last_agent_text_entry, last_agent)
+       |> stream_insert(:events, entry)}
+    end
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
@@ -139,7 +153,7 @@ defmodule SymphonyElixirWeb.TranscriptLive do
               <div class="transcript-event-body">
                 <div class="transcript-event-header">
                   <span class="transcript-event-kind"><%= entry.label %></span>
-                  <span class="transcript-event-name"><%= entry.name %></span>
+                  <span :if={entry.name not in ["notification", "unknown"]} class="transcript-event-name"><%= entry.name %></span>
                   <span :if={entry.timestamp} class="muted mono numeric"><%= entry.timestamp %></span>
                 </div>
 
@@ -279,8 +293,8 @@ defmodule SymphonyElixirWeb.TranscriptLive do
 
   defp event_timestamp(event) do
     case map_value(event, ["timestamp", :timestamp]) do
-      %DateTime{} = datetime -> DateTime.to_iso8601(datetime)
-      timestamp when is_binary(timestamp) -> timestamp
+      %DateTime{} = datetime -> datetime |> DateTime.to_time() |> Time.to_string() |> String.slice(0, 8)
+      timestamp when is_binary(timestamp) -> String.slice(timestamp, 11, 8)
       _ -> nil
     end
   end
@@ -388,6 +402,30 @@ defmodule SymphonyElixirWeb.TranscriptLive do
   end
 
   defp map_value(_value, _keys), do: nil
+
+  defp coalesce_entries(events) do
+    {entries_rev, last_agent, seq} =
+      Enum.reduce(events, {[], nil, 1}, fn event, {acc_rev, last_agent, seq} ->
+        kind = event_kind(event)
+
+        case {kind, last_agent} do
+          {"agent-text", %{} = prev} ->
+            new_text = agent_text(event) || ""
+            merged = %{prev | summary: prev.summary <> new_text}
+            {[merged | tl(acc_rev)], merged, seq}
+
+          {"agent-text", nil} ->
+            entry = transcript_entry(event, seq)
+            {[entry | acc_rev], entry, seq + 1}
+
+          _ ->
+            entry = transcript_entry(event, seq)
+            {[entry | acc_rev], nil, seq + 1}
+        end
+      end)
+
+    {Enum.reverse(entries_rev), last_agent, seq}
+  end
 
   defp error_message(reason), do: Map.get(@error_messages, reason, "An unexpected error occurred.")
 

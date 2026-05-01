@@ -159,8 +159,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <div class="issue-actions">
+                          <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
+                          <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                        </div>
                       </div>
                     </td>
                     <td>
@@ -173,15 +175,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <%= if entry.session_id do %>
                           <button
                             type="button"
-                            class="subtle-button"
-                            data-label="Copy ID"
+                            class="subtle-button session-copy-btn"
+                            data-label={String.slice(entry.session_id, 0, 8) <> "…"}
                             data-copy={entry.session_id}
-                            onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                            title={entry.session_id}
+                            onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied ✓'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1400);"
                           >
-                            Copy ID
+                            <%= String.slice(entry.session_id, 0, 8) %>…
                           </button>
                         <% else %>
-                          <span class="muted">n/a</span>
+                          <span class="muted">—</span>
                         <% end %>
                       </div>
                     </td>
@@ -193,9 +196,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           title={entry.last_message || to_string(entry.last_event || "n/a")}
                         ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
                         <span class="muted event-meta">
-                          <%= entry.last_event || "n/a" %>
                           <%= if entry.last_event_at do %>
-                            · <span class="mono numeric"><%= entry.last_event_at %></span>
+                            <span class="numeric"><%= format_event_at(entry.last_event_at, @now) %></span>
                           <% end %>
                         </span>
                       </div>
@@ -237,7 +239,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Issue</th>
                     <th>State</th>
                     <th>Last run</th>
-                    <th>Linear URL</th>
+                    <th>Links</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -253,11 +255,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td class="numeric"><%= format_last_run(entry, @now) %></td>
                     <td>
                       <%= if entry.url do %>
-                        <a class="issue-link watch-url" href={entry.url} target="_blank" rel="noreferrer">
-                          <%= entry.url %>
+                        <a class="action-pill" href={entry.url} target="_blank" rel="noreferrer">
+                          Linear ↗
                         </a>
                       <% else %>
-                        <span class="muted">n/a</span>
+                        <span class="muted">—</span>
                       <% end %>
                     </td>
                   </tr>
@@ -372,6 +374,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_ago(_seconds), do: "n/a"
+
+  defp format_event_at(nil, _now), do: nil
+  defp format_event_at(timestamp, now) when is_binary(timestamp) do
+    case seconds_since(timestamp, now) do
+      seconds when is_integer(seconds) -> format_ago(seconds)
+      _ -> String.slice(timestamp, 11, 8)
+    end
+  end
+  defp format_event_at(_timestamp, _now), do: nil
 
   defp format_runtime_seconds(seconds) when is_number(seconds) do
     whole_seconds = max(trunc(seconds), 0)
