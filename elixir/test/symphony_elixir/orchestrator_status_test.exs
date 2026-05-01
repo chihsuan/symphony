@@ -878,7 +878,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "orchestrator watches completed issues in non-active non-terminal states" do
     issue_id = "issue-watch"
     last_ran_at = DateTime.add(DateTime.utc_now(), -7_200, :second)
-    issue_url = "https://linear.app/a8c/issue/MT-WATCH"
+    issue_url = "https://linear.app/example/issue/MT-WATCH"
+    pull_request_url = "https://github.com/example/repo/pull/456"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -913,6 +914,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             issue_id => %{
               identifier: "MT-WATCH",
               url: issue_url,
+              pull_request_url: pull_request_url,
               last_ran_at: last_ran_at
             }
           },
@@ -939,6 +941,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                identifier: "MT-WATCH",
                state: "In Review",
                url: ^issue_url,
+               pull_request_url: ^pull_request_url,
                last_ran_at: ^last_ran_at,
                seconds_since_last_run: seconds_since_last_run
              }
@@ -1019,7 +1022,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "orchestrator rehydrates watching issues from completed run history on restart" do
     issue_id = "issue-watch-restart"
     issue_identifier = "MT-WATCHR"
-    issue_url = "https://linear.app/a8c/issue/MT-WATCHR"
+    issue_url = "https://linear.app/example/issue/MT-WATCHR"
+    pull_request_url = "https://github.com/example/repo/pull/789"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -1043,6 +1047,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                started_at: DateTime.add(ended_at, -120, :second),
                ended_at: ended_at,
                error: nil,
+               pull_request_url: pull_request_url,
                runtime_seconds: 120
              })
 
@@ -1076,7 +1081,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                issue_id: ^issue_id,
                identifier: ^issue_identifier,
                state: "In Review",
-               url: ^issue_url
+               url: ^issue_url,
+               pull_request_url: ^pull_request_url
              }
            ] = snapshot.watching
   end

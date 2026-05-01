@@ -158,7 +158,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr :for={entry <- @payload.running}>
                     <td>
                       <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <%= if entry.url do %>
+                          <a class="issue-id" href={entry.url} target="_blank" rel="noreferrer"><%= entry.issue_identifier %></a>
+                        <% else %>
+                          <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <% end %>
                         <div class="issue-actions">
                           <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
                           <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
@@ -176,6 +180,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <button
                             type="button"
                             class="subtle-button session-copy-btn"
+                            aria-label="Copy ID"
                             data-label={String.slice(entry.session_id, 0, 8) <> "…"}
                             data-copy={entry.session_id}
                             title={entry.session_id}
@@ -229,25 +234,30 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div class="table-wrap">
               <table class="data-table data-table-watching">
                 <colgroup>
-                  <col style="width: 12rem;" />
+                  <col style="width: 14rem;" />
                   <col style="width: 9rem;" />
                   <col style="width: 9rem;" />
-                  <col />
                 </colgroup>
                 <thead>
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
                     <th>Last run</th>
-                    <th>Links</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr :for={entry <- @payload.watching}>
                     <td>
                       <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <%= if entry.url do %>
+                          <a class="issue-id" href={entry.url} target="_blank" rel="noreferrer"><%= entry.issue_identifier %></a>
+                        <% else %>
+                          <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <% end %>
                         <div class="issue-actions">
+                          <%= if entry.pull_request_url do %>
+                            <a class="action-pill" href={entry.pull_request_url} target="_blank" rel="noreferrer">PR</a>
+                          <% end %>
                           <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
                           <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
                         </div>
@@ -259,15 +269,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       </span>
                     </td>
                     <td class="numeric"><%= format_last_run(entry, @now) %></td>
-                    <td>
-                      <%= if entry.url do %>
-                        <a class="action-pill" href={entry.url} target="_blank" rel="noreferrer">
-                          Linear ↗
-                        </a>
-                      <% else %>
-                        <span class="muted">—</span>
-                      <% end %>
-                    </td>
                   </tr>
                 </tbody>
               </table>
