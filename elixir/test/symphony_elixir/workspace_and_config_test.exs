@@ -1245,9 +1245,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.approval_policy == "on-request"
     assert config.codex.thread_sandbox == "workspace-write"
 
+    assert {:ok, canonical_explicit_workspace} =
+             SymphonyElixir.PathSafety.canonicalize(explicit_workspace)
+
+    assert {:ok, canonical_explicit_cache} =
+             SymphonyElixir.PathSafety.canonicalize(explicit_cache)
+
     assert Config.codex_turn_sandbox_policy(explicit_workspace) == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [explicit_workspace, explicit_cache]
+             "writableRoots" => [canonical_explicit_workspace, canonical_explicit_cache]
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
@@ -1628,7 +1634,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
-  test "runtime sandbox policy resolution passes explicit policies through unchanged" do
+  test "runtime sandbox policy resolution keeps clone workspace writable with explicit roots" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1651,9 +1657,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
 
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
       assert runtime_settings.turn_sandbox_policy == %{
                "type" => "workspaceWrite",
-               "writableRoots" => ["relative/path"],
+               "writableRoots" => [canonical_issue_workspace, "relative/path"],
                "networkAccess" => true
              }
 
@@ -1670,6 +1679,68 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert runtime_settings.turn_sandbox_policy == %{
                "type" => "futureSandbox",
                "nested" => %{"flag" => true}
+             }
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime sandbox policy resolution adds worktree git metadata root" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-worktree-sandbox-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-101")
+      repo = Path.join(test_root, "repo")
+      repo_git = Path.join(repo, ".git")
+
+      File.mkdir_p!(issue_workspace)
+      File.mkdir_p!(repo_git)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: repo,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          writableRoots: ["relative/path"],
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, canonical_repo_git} = SymphonyElixir.PathSafety.canonicalize(repo_git)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [canonical_issue_workspace, canonical_repo_git, "relative/path"],
+               "networkAccess" => true
+             }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: repo,
+        codex_turn_sandbox_policy: nil
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [canonical_issue_workspace, canonical_repo_git],
+               "readOnlyAccess" => %{"type" => "fullAccess"},
+               "networkAccess" => false,
+               "excludeTmpdirEnvVar" => false,
+               "excludeSlashTmp" => false
              }
     after
       File.rm_rf(test_root)

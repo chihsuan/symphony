@@ -363,14 +363,19 @@ defmodule SymphonyElixir.Config.Schema do
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        resolve_explicit_runtime_turn_sandbox_policy(policy, workspace, settings.workspace.root, opts)
+    policy_result =
+      case settings.codex.turn_sandbox_policy do
+        %{} = policy ->
+          resolve_explicit_runtime_turn_sandbox_policy(policy, workspace, settings.workspace.root, opts)
 
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> default_runtime_turn_sandbox_policy(opts)
+        _ ->
+          workspace
+          |> default_workspace_root(settings.workspace.root)
+          |> default_runtime_turn_sandbox_policy(opts)
+      end
+
+    with {:ok, policy} <- policy_result do
+      {:ok, ensure_workspace_write_roots(policy, settings, workspace, opts)}
     end
   end
 
@@ -675,6 +680,71 @@ defmodule SymphonyElixir.Config.Schema do
   defp default_runtime_policy_override?(policy) when is_map(policy) do
     not Map.has_key?(policy, "writableRoots") and Map.get(policy, "type", "workspaceWrite") == "workspaceWrite"
   end
+
+  defp ensure_workspace_write_roots(%{"type" => "workspaceWrite"} = policy, settings, workspace, opts) do
+    prepend_roots =
+      [runtime_workspace_write_root(workspace, opts)] ++ worktree_git_metadata_roots(settings, opts)
+
+    prepend_roots = Enum.reject(prepend_roots, &is_nil/1)
+
+    if prepend_roots == [] do
+      policy
+    else
+      writable_roots =
+        policy
+        |> Map.get("writableRoots", [])
+        |> normalize_writable_roots(opts)
+
+      Map.put(policy, "writableRoots", Enum.uniq(prepend_roots ++ writable_roots))
+    end
+  end
+
+  defp ensure_workspace_write_roots(policy, _settings, _workspace, _opts), do: policy
+
+  defp runtime_workspace_write_root(workspace, opts) when is_binary(workspace) and workspace != "" do
+    runtime_writable_root(workspace, opts)
+  end
+
+  defp runtime_workspace_write_root(_workspace, _opts), do: nil
+
+  defp worktree_git_metadata_roots(
+         %__MODULE__{workspace: %Workspace{strategy: "worktree", repo: repo}},
+         opts
+       )
+       when is_binary(repo) and repo != "" do
+    [runtime_writable_root(Path.join(repo, ".git"), opts)]
+  end
+
+  defp worktree_git_metadata_roots(_settings, _opts), do: []
+
+  defp runtime_writable_root(path, opts) when is_binary(path) do
+    if Keyword.get(opts, :remote, false) do
+      path
+    else
+      expanded_path = expand_local_workspace_root(path)
+
+      case PathSafety.canonicalize(expanded_path) do
+        {:ok, canonical_path} -> canonical_path
+        {:error, _reason} -> expanded_path
+      end
+    end
+  end
+
+  defp normalize_writable_roots(roots, opts) when is_list(roots) do
+    Enum.map(roots, &normalize_writable_root(&1, opts))
+  end
+
+  defp normalize_writable_roots(_roots, _opts), do: []
+
+  defp normalize_writable_root(root, opts) when is_binary(root) do
+    cond do
+      Keyword.get(opts, :remote, false) -> root
+      Path.type(root) == :relative -> root
+      true -> runtime_writable_root(root, opts)
+    end
+  end
+
+  defp normalize_writable_root(root, _opts), do: root
 
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
     do: workspace
