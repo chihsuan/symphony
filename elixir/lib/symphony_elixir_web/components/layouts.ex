@@ -28,8 +28,77 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            var transcriptFilterHook = {
+              mounted: function () {
+                this.activeFilters = new Set();
+                this.handleFilterClick = function (event) {
+                  var button = event.target.closest("[data-transcript-filter]");
+                  if (!button || !this.el.contains(button)) return;
+
+                  event.preventDefault();
+
+                  var filter = button.getAttribute("data-transcript-filter");
+                  if (filter === "all") {
+                    this.activeFilters.clear();
+                  } else if (this.activeFilters.has(filter)) {
+                    this.activeFilters.delete(filter);
+                  } else {
+                    this.activeFilters.add(filter);
+                  }
+
+                  this.applyFilters();
+                }.bind(this);
+
+                this.el.addEventListener("click", this.handleFilterClick);
+                this.applyFilters();
+              },
+              updated: function () {
+                this.applyFilters();
+              },
+              destroyed: function () {
+                this.el.removeEventListener("click", this.handleFilterClick);
+              },
+              filterButtons: function () {
+                return Array.from(this.el.querySelectorAll("[data-transcript-filter]"));
+              },
+              filterKinds: function () {
+                return this.filterButtons()
+                  .map(function (button) {
+                    return button.getAttribute("data-transcript-filter");
+                  })
+                  .filter(function (filter) {
+                    return filter && filter !== "all";
+                  });
+              },
+              applyFilters: function () {
+                var events = this.el.querySelector("[data-transcript-events]");
+                if (!events) return;
+
+                events.removeAttribute("data-filter-active");
+                this.filterKinds().forEach(function (filter) {
+                  events.removeAttribute("data-filter-" + filter);
+                });
+
+                if (this.activeFilters.size > 0) {
+                  events.setAttribute("data-filter-active", "true");
+                  this.activeFilters.forEach(function (filter) {
+                    events.setAttribute("data-filter-" + filter, "true");
+                  });
+                }
+
+                this.filterButtons().forEach(function (button) {
+                  var filter = button.getAttribute("data-transcript-filter");
+                  var pressed =
+                    filter === "all" ? this.activeFilters.size === 0 : this.activeFilters.has(filter);
+
+                  button.setAttribute("aria-pressed", pressed ? "true" : "false");
+                }, this);
+              }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: {TranscriptFilter: transcriptFilterHook}
             });
 
             liveSocket.connect();
