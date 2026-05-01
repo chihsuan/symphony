@@ -3,9 +3,12 @@ defmodule SymphonyElixirWeb.ObservabilityPubSub do
   PubSub helpers for observability dashboard updates.
   """
 
+  require Logger
+
   @pubsub SymphonyElixir.PubSub
   @topic "observability:dashboard"
   @update_message :observability_updated
+  @transcript_topic_prefix "transcript:"
 
   @spec subscribe() :: :ok | {:error, term()}
   def subscribe do
@@ -21,5 +24,36 @@ defmodule SymphonyElixirWeb.ObservabilityPubSub do
       _ ->
         :ok
     end
+  end
+
+  @spec subscribe_transcript(String.t()) :: :ok | {:error, term()}
+  def subscribe_transcript(issue_id) when is_binary(issue_id) do
+    Phoenix.PubSub.subscribe(@pubsub, transcript_topic(issue_id))
+  end
+
+  @spec broadcast_transcript_event(String.t(), map()) :: :ok
+  def broadcast_transcript_event(issue_id, event)
+      when is_binary(issue_id) and is_map(event) do
+    case Process.whereis(@pubsub) do
+      pid when is_pid(pid) ->
+        case Phoenix.PubSub.broadcast(@pubsub, transcript_topic(issue_id), {:transcript_event, event}) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("failed to broadcast transcript event: #{inspect(reason)}")
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  def broadcast_transcript_event(_issue_id, _event), do: :ok
+
+  @spec transcript_topic(String.t()) :: String.t()
+  def transcript_topic(issue_id) when is_binary(issue_id) do
+    @transcript_topic_prefix <> issue_id
   end
 end

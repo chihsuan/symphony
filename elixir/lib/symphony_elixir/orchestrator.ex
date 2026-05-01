@@ -9,11 +9,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, RunStore, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixirWeb.ObservabilityPubSub
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @default_transcript_buffer_size 200
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -212,6 +214,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_codex_rate_limits(update)
 
         persist_running_entry(updated_running_entry)
+        notify_transcript(issue_id, update)
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -835,6 +838,8 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: nil,
           session_id: nil,
           transcript_path: nil,
+          transcript_buffer: :queue.new(),
+          transcript_buffer_size: 0,
           last_codex_message: nil,
           last_codex_timestamp: nil,
           last_codex_event: nil,
@@ -1053,6 +1058,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp notify_dashboard do
     StatusDashboard.notify_update()
   end
+
+  defp notify_transcript(issue_id, event) when is_binary(issue_id) do
+    ObservabilityPubSub.broadcast_transcript_event(issue_id, event)
+  end
+
+  defp notify_transcript(_issue_id, _event), do: :ok
 
   defp handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
@@ -1561,6 +1572,8 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          transcript_buffer: transcript_buffer_list(metadata),
+          transcript_buffer_size: Map.get(metadata, :transcript_buffer_size, 0),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)
@@ -1637,6 +1650,14 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
+    {transcript_buffer, transcript_buffer_size} =
+      append_transcript_event(
+        Map.get(running_entry, :transcript_buffer, :queue.new()),
+        Map.get(running_entry, :transcript_buffer_size, 0),
+        update,
+        transcript_buffer_limit()
+      )
+
     {
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
@@ -1651,11 +1672,52 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, Map.get(running_entry, :session_id), update)
+        turn_count: turn_count_for_update(turn_count, Map.get(running_entry, :session_id), update),
+        transcript_buffer: transcript_buffer,
+        transcript_buffer_size: transcript_buffer_size
       }),
       token_delta
     }
   end
+
+  defp append_transcript_event(_queue, _size, _event, limit) when not is_integer(limit) or limit <= 0,
+    do: {:queue.new(), 0}
+
+  defp append_transcript_event(queue, _size, event, limit) do
+    queue = if :queue.is_queue(queue), do: queue, else: :queue.new()
+
+    size = :queue.len(queue)
+
+    event
+    |> :queue.in(queue)
+    |> trim_transcript_buffer(size + 1, limit)
+  end
+
+  defp trim_transcript_buffer(queue, size, limit) when size > limit do
+    {{:value, _event}, queue} = :queue.out(queue)
+    trim_transcript_buffer(queue, size - 1, limit)
+  end
+
+  defp trim_transcript_buffer(queue, size, _limit), do: {queue, size}
+
+  defp transcript_buffer_limit do
+    Config.settings!().observability
+    |> Map.get(:transcript_buffer_size, @default_transcript_buffer_size)
+    |> case do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _ -> @default_transcript_buffer_size
+    end
+  end
+
+  defp transcript_buffer_list(%{transcript_buffer: queue}) do
+    cond do
+      :queue.is_queue(queue) -> :queue.to_list(queue)
+      is_list(queue) -> queue
+      true -> []
+    end
+  end
+
+  defp transcript_buffer_list(_metadata), do: []
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),

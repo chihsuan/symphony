@@ -37,7 +37,7 @@ defmodule SymphonyElixir.TestSupport do
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
-        if Process.whereis(SymphonyElixir.RunStore), do: SymphonyElixir.RunStore.clear()
+        :ok = SymphonyElixir.RunStore.clear()
         stop_default_http_server()
 
         on_exit(fn ->
@@ -130,6 +130,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
+          observability_transcript_buffer_size: 200,
           server_port: nil,
           server_host: nil,
           prompt: @workflow_prompt
@@ -173,6 +174,7 @@ defmodule SymphonyElixir.TestSupport do
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
+    observability_transcript_buffer_size = Keyword.get(config, :observability_transcript_buffer_size)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
@@ -213,7 +215,12 @@ defmodule SymphonyElixir.TestSupport do
         "  command_timeout_ms: #{yaml_value(codex_command_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         routing_yaml(routing),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms,
+          observability_transcript_buffer_size
+        ),
         server_yaml(server_port, server_host),
         "---",
         prompt
@@ -278,12 +285,13 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
+  defp observability_yaml(enabled, refresh_ms, render_interval_ms, transcript_buffer_size) do
     [
       "observability:",
       "  dashboard_enabled: #{yaml_value(enabled)}",
       "  refresh_ms: #{yaml_value(refresh_ms)}",
-      "  render_interval_ms: #{yaml_value(render_interval_ms)}"
+      "  render_interval_ms: #{yaml_value(render_interval_ms)}",
+      "  transcript_buffer_size: #{yaml_value(transcript_buffer_size)}"
     ]
     |> Enum.join("\n")
   end

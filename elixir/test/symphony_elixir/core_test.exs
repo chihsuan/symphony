@@ -216,6 +216,7 @@ defmodule SymphonyElixir.CoreTest do
         case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
+          {:error, :not_found} -> :ok
         end
       end
     end)

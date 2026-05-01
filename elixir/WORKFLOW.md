@@ -16,6 +16,8 @@ tracker:
     - Done
 polling:
   interval_ms: 5000
+observability:
+  transcript_buffer_size: 200
 workspace:
   root: ~/Projects/symphony-workspaces
   # strategy: worktree

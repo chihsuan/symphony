@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixirWeb.ObservabilityPubSub
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -606,6 +607,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "/issues/MT-HTTP/transcript"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -682,6 +684,103 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Operations Dashboard"
     assert html =~ "Runtime"
+  end
+
+  test "transcript liveview replays buffered events and appends pubsub events" do
+    orchestrator_name = Module.concat(__MODULE__, :TranscriptOrchestrator)
+
+    buffered_agent_event = %{
+      event: :notification,
+      payload: %{
+        "method" => "item/agentMessage/delta",
+        "params" => %{"delta" => "buffered hello"}
+      },
+      timestamp: DateTime.utc_now()
+    }
+
+    buffered_tool_call_event = %{
+      event: :notification,
+      payload: %{
+        "method" => "item/tool/call",
+        "params" => %{
+          "name" => "linear_graphql",
+          "arguments" => %{"query" => "query Viewer { viewer { id } }"}
+        }
+      },
+      timestamp: DateTime.utc_now()
+    }
+
+    buffered_tool_result_event = %{
+      event: :notification,
+      payload: %{
+        "method" => "item/commandExecution/outputDelta",
+        "params" => %{"outputDelta" => "buffered command output"}
+      },
+      timestamp: DateTime.utc_now()
+    }
+
+    snapshot =
+      update_in(static_snapshot().running, fn [running] ->
+        [
+          running
+          |> Map.put(:transcript_buffer, [
+            buffered_agent_event,
+            buffered_tool_call_event,
+            buffered_tool_result_event
+          ])
+          |> Map.put(:transcript_buffer_size, 3)
+        ]
+      end)
+
+    {:ok, _orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/issues/MT-HTTP/transcript")
+    assert html =~ "Live Transcript"
+    assert html =~ "MT-HTTP"
+    assert html =~ "buffered hello"
+    assert html =~ "Tool call"
+    assert html =~ "linear_graphql"
+    assert html =~ "Tool result"
+    assert html =~ "buffered command output"
+
+    live_event = %{
+      event: :notification,
+      payload: %{
+        "method" => "item/commandExecution/requestApproval",
+        "params" => %{"msg" => %{"command" => "mix test"}}
+      },
+      timestamp: DateTime.utc_now()
+    }
+
+    assert :ok = ObservabilityPubSub.broadcast_transcript_event("issue-http", live_event)
+
+    assert_eventually(fn ->
+      render(view) =~ "mix test"
+    end)
+  end
+
+  test "transcript liveview renders an error state for missing issues" do
+    orchestrator_name = Module.concat(__MODULE__, :MissingTranscriptOrchestrator)
+
+    {:ok, _orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/issues/MT-MISSING/transcript")
+    assert html =~ "Transcript unavailable"
+    assert html =~ "No running issue matched this identifier."
   end
 
   test "dashboard liveview renders an unavailable state without crashing" do

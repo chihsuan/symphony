@@ -205,15 +205,19 @@ codex:
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
-- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. The state endpoint
-  includes recent durable run history when available.
+- `observability.transcript_buffer_size` controls how many recent Codex events each running issue
+  keeps for transcript replay. Default: `200`.
+- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard, transcript view,
+  and JSON API at `/`, `/issues/<issue_identifier>/transcript`, `/api/v1/state`,
+  `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. The state endpoint includes recent durable
+  run history when available.
 
 ## Web dashboard
 
 The observability UI now runs on a minimal Phoenix stack:
 
 - LiveView for the dashboard at `/`
+- LiveView for a running issue transcript at `/issues/<issue_identifier>/transcript`
 - JSON API for operational debugging under `/api/v1/*`
 - Running, Watching, and retry queue sections for active sessions, human-waiting issues, and backoff
   pressure
