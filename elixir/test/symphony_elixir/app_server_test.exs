@@ -167,10 +167,13 @@ defmodule SymphonyElixir.AppServerTest do
         {:ok, canonical_workspace} =
           SymphonyElixir.PathSafety.canonicalize(Path.expand(workspace))
 
+        {:ok, canonical_workspace_git} =
+          SymphonyElixir.PathSafety.canonicalize(Path.join(workspace, ".git"))
+
         expected_policy =
           case configured_policy do
             %{"type" => "workspaceWrite"} ->
-              Map.put(configured_policy, "writableRoots", [canonical_workspace, "relative/path"])
+              Map.put(configured_policy, "writableRoots", [canonical_workspace, canonical_workspace_git, "relative/path"])
 
             _ ->
               configured_policy
@@ -1380,7 +1383,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [remote_workspace],
+        "writableRoots" => [remote_workspace, "#{remote_workspace}/.git"],
         "readOnlyAccess" => %{"type" => "fullAccess"},
         "networkAccess" => false,
         "excludeTmpdirEnvVar" => false,

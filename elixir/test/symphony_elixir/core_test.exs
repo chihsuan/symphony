@@ -1589,7 +1589,7 @@ defmodule SymphonyElixir.CoreTest do
 
       expected_turn_sandbox_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [canonical_workspace],
+        "writableRoots" => [canonical_workspace, Path.join(canonical_workspace, ".git")],
         "readOnlyAccess" => %{"type" => "fullAccess"},
         "networkAccess" => false,
         "excludeTmpdirEnvVar" => false,
@@ -1817,7 +1817,7 @@ defmodule SymphonyElixir.CoreTest do
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [canonical_workspace, canonical_workspace_cache]
+        "writableRoots" => [canonical_workspace, Path.join(canonical_workspace, ".git"), canonical_workspace_cache]
       }
 
       assert Enum.any?(lines, fn line ->

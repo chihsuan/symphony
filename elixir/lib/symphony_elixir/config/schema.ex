@@ -7,6 +7,8 @@ defmodule SymphonyElixir.Config.Schema do
 
   alias SymphonyElixir.PathSafety
 
+  require Logger
+
   @primary_key false
 
   @type t :: %__MODULE__{}
@@ -683,7 +685,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp ensure_workspace_write_roots(%{"type" => "workspaceWrite"} = policy, settings, workspace, opts) do
     prepend_roots =
-      [runtime_workspace_write_root(workspace, opts)] ++ worktree_git_metadata_roots(settings, opts)
+      [runtime_workspace_write_root(workspace, opts)] ++
+        workspace_git_metadata_roots(workspace, opts) ++
+        worktree_git_metadata_roots(settings, opts)
 
     prepend_roots = Enum.reject(prepend_roots, &is_nil/1)
 
@@ -707,6 +711,12 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp runtime_workspace_write_root(_workspace, _opts), do: nil
 
+  defp workspace_git_metadata_roots(workspace, opts) when is_binary(workspace) and workspace != "" do
+    [runtime_writable_root(Path.join(workspace, ".git"), opts)]
+  end
+
+  defp workspace_git_metadata_roots(_workspace, _opts), do: []
+
   defp worktree_git_metadata_roots(
          %__MODULE__{workspace: %Workspace{strategy: "worktree", repo: repo}},
          opts
@@ -724,14 +734,20 @@ defmodule SymphonyElixir.Config.Schema do
       expanded_path = expand_local_workspace_root(path)
 
       case PathSafety.canonicalize(expanded_path) do
-        {:ok, canonical_path} -> canonical_path
-        {:error, _reason} -> expanded_path
+        {:ok, canonical_path} ->
+          canonical_path
+
+        {:error, reason} ->
+          Logger.warning("Failed to canonicalize writable root, skipping: path=#{expanded_path} reason=#{inspect(reason)}")
+          nil
       end
     end
   end
 
   defp normalize_writable_roots(roots, opts) when is_list(roots) do
-    Enum.map(roots, &normalize_writable_root(&1, opts))
+    roots
+    |> Enum.map(&normalize_writable_root(&1, opts))
+    |> Enum.reject(&is_nil/1)
   end
 
   defp normalize_writable_roots(_roots, _opts), do: []
@@ -744,7 +760,10 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp normalize_writable_root(root, _opts), do: root
+  defp normalize_writable_root(root, _opts) do
+    Logger.warning("Ignoring non-string writableRoots entry: #{inspect(root)}")
+    nil
+  end
 
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
     do: workspace

@@ -512,11 +512,12 @@ fields locally if they want stricter startup checks.
   - Default: implementation-defined.
 - `turn_sandbox_policy` (Codex `SandboxPolicy` value)
   - Default: implementation-defined.
-  - Runtime note: when the policy type is `workspaceWrite`, implementations SHOULD ensure the
-    current issue workspace remains writable even when callers add extra `writableRoots` for linked
-    worktree Git metadata or similar adjunct paths.
-  - For linked worktree workspace strategies, implementations SHOULD include the minimal Git
-    metadata roots needed for branch, fetch, commit, and push operations.
+  - Runtime note: when the policy type is `workspaceWrite`, implementations MUST ensure the
+    current issue workspace remains writable (when a workspace path is available) even when callers
+    add extra `writableRoots` for linked worktree Git metadata or similar adjunct paths.
+  - Implementations MUST include the minimal Git metadata roots needed for branch, fetch,
+    commit, and push operations, including the issue workspace `.git` path and, for linked
+    worktree workspace strategies, the primary clone `.git` metadata root.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `read_timeout_ms` (integer)
@@ -645,6 +646,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
+- `tracker.assignee`: optional string or `$VAR`, canonical env `LINEAR_ASSIGNEE` when
+  `tracker.kind=linear`; `"me"` resolves the current Linear viewer
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
@@ -1249,6 +1252,10 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - Auth token sent in `Authorization` header
 - `tracker.project_slug` maps to Linear project `slugId`
 - Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
+- If `tracker.assignee` is set, `fetch_candidate_issues()` returns only issues whose Linear
+  assignee matches the configured value. The special value `"me"` resolves the current viewer ID.
+- Issue-state refresh still returns requested issues that no longer match `tracker.assignee`, with
+  normalized `assigned_to_worker=false`, so reassignment can stop active workers.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`

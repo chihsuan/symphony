@@ -360,7 +360,7 @@ defmodule SymphonyElixir.StatusDashboard do
         ([
            colorize("╭─ SYMPHONY STATUS", @ansi_bold),
            colorize("│ Agents: ", @ansi_bold) <>
-             colorize("#{agent_count}", @ansi_green) <>
+             colorize("#{agent_count}", @ansi_cyan) <>
              colorize("/", @ansi_gray) <>
              colorize("#{max_agents}", @ansi_gray),
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
