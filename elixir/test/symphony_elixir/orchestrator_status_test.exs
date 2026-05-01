@@ -1809,7 +1809,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     failed = %{
       event: :tool_call_failed,
       message: %{
-        payload: %{"method" => "item/tool/call", "params" => %{"tool" => "linear_graphql"}}
+        payload: %{"method" => "item/tool/call", "params" => %{"tool" => "linear_graphql"}},
+        result: %{
+          "output" =>
+            Jason.encode!(%{
+              "error" => %{
+                "body" => %{"errors" => [%{"message" => "Cannot query field \"links\" on type \"Issue\"."}]},
+                "message" => "Linear GraphQL request failed with HTTP 400.",
+                "status" => 400
+              }
+            }),
+          "success" => false
+        }
       }
     }
 
@@ -1825,6 +1836,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert StatusDashboard.humanize_codex_message(failed) =~
              "dynamic tool call failed (linear_graphql)"
+
+    assert StatusDashboard.humanize_codex_message(failed) =~
+             "Cannot query field"
 
     assert StatusDashboard.humanize_codex_message(unsupported) =~
              "unsupported dynamic tool call rejected (unknown_tool)"

@@ -100,13 +100,6 @@ query IssueByKey($key: String!) {
     url
     description
     updatedAt
-    links {
-      nodes {
-        id
-        url
-        title
-      }
-    }
   }
 }
 ```

@@ -1261,8 +1261,8 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:tool_call_completed, _message, payload),
     do: humanize_dynamic_tool_event("dynamic tool call completed", payload)
 
-  defp humanize_codex_event(:tool_call_failed, _message, payload),
-    do: humanize_dynamic_tool_event("dynamic tool call failed", payload)
+  defp humanize_codex_event(:tool_call_failed, message, payload),
+    do: humanize_dynamic_tool_event("dynamic tool call failed", payload, message)
 
   defp humanize_codex_event(:unsupported_tool_call, _message, payload),
     do: humanize_dynamic_tool_event("unsupported dynamic tool call rejected", payload)
@@ -1531,19 +1531,55 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_dynamic_tool_event(base, payload) do
-    case dynamic_tool_name(payload) do
-      tool when is_binary(tool) ->
-        trimmed = String.trim(tool)
+  defp humanize_dynamic_tool_event(base, payload, message \\ nil) do
+    tool_text =
+      case dynamic_tool_name(payload) do
+        tool when is_binary(tool) ->
+          trimmed = String.trim(tool)
 
-        if trimmed == "" do
+          if trimmed == "" do
+            base
+          else
+            "#{base} (#{trimmed})"
+          end
+
+        _ ->
           base
-        else
-          "#{base} (#{trimmed})"
-        end
+      end
+
+    case dynamic_tool_error_summary(message) do
+      summary when is_binary(summary) and summary != "" -> "#{tool_text}: #{summary}"
+      _ -> tool_text
+    end
+  end
+
+  defp dynamic_tool_error_summary(message) do
+    output =
+      map_path(message, ["result", "output"]) ||
+        map_path(message, [:result, :output])
+
+    with output when is_binary(output) <- output,
+         {:ok, decoded} <- Jason.decode(output) do
+      graphql_error_message(decoded) ||
+        map_path(decoded, ["error", "message"]) ||
+        map_path(decoded, [:error, :message])
+    else
+      _ -> nil
+    end
+    |> case do
+      summary when is_binary(summary) -> inline_text(summary)
+      _ -> nil
+    end
+  end
+
+  defp graphql_error_message(payload) do
+    case map_path(payload, ["error", "body", "errors"]) ||
+           map_path(payload, [:error, :body, :errors]) do
+      [%{} = error | _] ->
+        map_value(error, ["message", :message])
 
       _ ->
-        base
+        nil
     end
   end
 
