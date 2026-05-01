@@ -570,6 +570,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
     assert dashboard_css =~ ".transcript-list[data-filter-active=\"true\"] .transcript-event"
 
+    for {filter, class} <- [
+          {"agent-text", "agent-text"},
+          {"tool-call", "tool-call"},
+          {"tool-result", "tool-result"},
+          {"session", "session"},
+          {"error", "error"},
+          {"event", "event"}
+        ] do
+      assert dashboard_css =~
+               ".transcript-list[data-filter-#{filter}=\"true\"] .transcript-event-#{class}"
+    end
+
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
 
