@@ -25,7 +25,6 @@ defmodule SymphonyElixir.Config.Schema do
     "files.pythonhosted.org",
     "github-cloud.githubusercontent.com",
     "github-cloud.s3.amazonaws.com",
-    "github.a8c.com",
     "github.com",
     "gist.githubusercontent.com",
     "hex.pm",

@@ -17,8 +17,8 @@
 │
 │   ID       STATE          LAST RUN     LINEAR URL
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ◌ MT-902   Human Review   45m ago      https://linear.app/a8c/issue/MT-902
-│ ◌ MT-901   In Review      2h ago       https://linear.app/a8c/issue/MT-901
+│ ◌ MT-902   Human Review   45m ago      https://linear.app/example/issue/MT-902
+│ ◌ MT-901   In Review      2h ago       https://linear.app/example/issue/MT-901
 │
 ├─ Backoff queue
 │
