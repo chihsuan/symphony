@@ -766,6 +766,23 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
   end
 
+  test "transcript liveview renders an error state for missing issues" do
+    orchestrator_name = Module.concat(__MODULE__, :MissingTranscriptOrchestrator)
+
+    {:ok, _orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/issues/MT-MISSING/transcript")
+    assert html =~ "Transcript unavailable"
+    assert html =~ "No running issue matched this identifier."
+  end
+
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),

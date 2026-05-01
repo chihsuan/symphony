@@ -5,11 +5,17 @@ defmodule SymphonyElixirWeb.TranscriptLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  require Logger
+
   alias SymphonyElixir.StatusDashboard
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
 
   @raw_limit 2_400
   @summary_limit 600
+  @error_messages %{
+    issue_not_found: "No running issue matched this identifier.",
+    snapshot_unavailable: "The orchestrator snapshot is unavailable."
+  }
 
   @impl true
   def mount(%{"identifier" => issue_identifier}, _session, socket) do
@@ -44,7 +50,7 @@ defmodule SymphonyElixirWeb.TranscriptLive do
       end
 
     if connected?(socket) and is_nil(socket.assigns.error) do
-      :ok = ObservabilityPubSub.subscribe_transcript(socket.assigns.issue_id)
+      subscribe_transcript(socket.assigns.issue_id)
     end
 
     {:ok, socket}
@@ -383,8 +389,18 @@ defmodule SymphonyElixirWeb.TranscriptLive do
 
   defp map_value(_value, _keys), do: nil
 
-  defp error_message(:issue_not_found), do: "No running issue matched this identifier."
-  defp error_message(:snapshot_unavailable), do: "The orchestrator snapshot is unavailable."
+  defp error_message(reason), do: Map.get(@error_messages, reason, "An unexpected error occurred.")
+
+  defp subscribe_transcript(issue_id) do
+    case ObservabilityPubSub.subscribe_transcript(issue_id) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("failed to subscribe to transcript stream: #{inspect(reason)}")
+        :ok
+    end
+  end
 
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator

@@ -166,6 +166,65 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.transcript_buffer_size == 2
   end
 
+  test "orchestrator transcript buffer can be disabled by observability config" do
+    write_workflow_file!(Workflow.workflow_file_path(), observability_transcript_buffer_size: 0)
+
+    issue_id = "issue-disabled-transcript"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-190",
+      title: "Disabled transcript test",
+      description: "Do not retain transcript events",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-190"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :DisabledTranscriptOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    1..4
+    |> Enum.map(fn index ->
+      %{event: "event-#{index}", payload: %{index: index}, timestamp: DateTime.utc_now()}
+    end)
+    |> Enum.each(fn update ->
+      send(pid, {:codex_worker_update, issue_id, update})
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.transcript_buffer == []
+    assert snapshot_entry.transcript_buffer_size == 0
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
