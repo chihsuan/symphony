@@ -516,8 +516,9 @@ fields locally if they want stricter startup checks.
     current issue workspace remains writable (when a workspace path is available) even when callers
     add extra `writableRoots` for linked worktree Git metadata or similar adjunct paths.
   - Implementations MUST include the minimal Git metadata roots needed for branch, fetch,
-    commit, and push operations, including the issue workspace `.git` path and, for linked
-    worktree workspace strategies, the primary clone `.git` metadata root.
+    commit, and push operations: always the issue workspace `.git` path (when a workspace path
+    is available), and for linked worktree workspace strategies, also the primary clone `.git`
+    metadata root.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `read_timeout_ms` (integer)

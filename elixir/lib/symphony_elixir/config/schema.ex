@@ -691,7 +691,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     prepend_roots = Enum.reject(prepend_roots, &is_nil/1)
 
-    if prepend_roots == [] do
+    if prepend_roots == [] and not Map.has_key?(policy, "writableRoots") do
       policy
     else
       writable_roots =
@@ -711,6 +711,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp runtime_workspace_write_root(_workspace, _opts), do: nil
 
+  # In a linked worktree, workspace/.git is a regular file (a gitdir pointer), not a directory.
+  # Including it here ensures the pointer file itself is writable; the actual metadata under
+  # repo/.git/worktrees/<name>/ is covered by worktree_git_metadata_roots/2.
   defp workspace_git_metadata_roots(workspace, opts) when is_binary(workspace) and workspace != "" do
     [runtime_writable_root(Path.join(workspace, ".git"), opts)]
   end

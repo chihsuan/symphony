@@ -136,11 +136,13 @@ Notes:
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony forwards the configured map to
   Codex, but for `workspaceWrite` policies it ensures the current issue workspace stays in
-  `writableRoots` at runtime when a workspace path is available. Symphony also includes the issue
-  workspace `.git` path, and for `workspace.strategy: worktree` it includes the configured
-  repository `.git` metadata root, so branch, commit, fetch, and push operations can update Git
-  metadata. Compatibility for the remaining fields still depends on the targeted Codex app-server
-  version rather than local Symphony validation.
+  `writableRoots` at runtime when a workspace path is available. Symphony always includes the
+  issue workspace `.git` path, and for `workspace.strategy: worktree` it additionally includes the
+  configured repository `.git` metadata root, so branch, commit, fetch, and push operations can
+  update Git metadata. Symphony prepends these managed roots before any `writableRoots` already
+  present in the configured policy, and deduplicates the combined list. Compatibility for the
+  remaining fields still depends on the targeted Codex app-server version rather than local
+  Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
