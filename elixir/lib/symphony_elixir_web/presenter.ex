@@ -5,6 +5,13 @@ defmodule SymphonyElixirWeb.Presenter do
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
 
+  @empty_codex_totals %{
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    seconds_running: 0
+  }
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -22,7 +29,7 @@ defmodule SymphonyElixirWeb.Presenter do
           watching: snapshot |> Map.get(:watching, []) |> Enum.map(&watching_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           run_history: Enum.map(Map.get(snapshot, :run_history, []), &run_history_payload/1),
-          codex_totals: snapshot.codex_totals,
+          codex_totals: normalize_codex_totals(Map.get(snapshot, :codex_totals)),
           rate_limits: snapshot.rate_limits
         }
 
@@ -211,6 +218,12 @@ defmodule SymphonyElixirWeb.Presenter do
       tokens: Map.get(entry, :tokens, %{})
     }
   end
+
+  defp normalize_codex_totals(totals) when is_map(totals) do
+    Map.merge(@empty_codex_totals, totals)
+  end
+
+  defp normalize_codex_totals(_totals), do: @empty_codex_totals
 
   defp workspace_payload(issue_identifier, running, retry) do
     if running || retry do

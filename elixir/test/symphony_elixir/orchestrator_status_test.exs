@@ -892,6 +892,71 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     GenServer.stop(restarted_pid)
   end
 
+  test "orchestrator rehydrates watching issues from completed run history on restart" do
+    issue_id = "issue-watch-restart"
+    issue_identifier = "MT-WATCHR"
+    issue_url = "https://linear.app/a8c/issue/MT-WATCHR"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress"],
+      tracker_terminal_states: ["Done", "Canceled"]
+    )
+
+    :ok = RunStore.clear()
+
+    ended_at = DateTime.add(DateTime.utc_now(), -3_600, :second)
+
+    assert :ok =
+             RunStore.put_run(%{
+               run_id: "run-watch-restart",
+               issue_id: issue_id,
+               issue_identifier: issue_identifier,
+               title: "Watch on restart",
+               state: "In Progress",
+               status: "success",
+               attempt: 1,
+               started_at: DateTime.add(ended_at, -120, :second),
+               ended_at: ended_at,
+               error: nil,
+               runtime_seconds: 120
+             })
+
+    watching_issue = %Issue{
+      id: issue_id,
+      identifier: issue_identifier,
+      title: "Watch on restart",
+      state: "In Review",
+      url: issue_url
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [watching_issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :WatchRestartOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    snapshot =
+      wait_for_snapshot(pid, fn
+        %{watching: [%{identifier: ^issue_identifier}]} -> true
+        _ -> false
+      end)
+
+    assert [
+             %{
+               issue_id: ^issue_id,
+               identifier: ^issue_identifier,
+               state: "In Review",
+               url: ^issue_url
+             }
+           ] = snapshot.watching
+  end
+
   test "orchestrator startup marks interrupted dispatched runs as failures" do
     test_root =
       Path.join(

@@ -707,6 +707,78 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_handle_approval_request(
+         port,
+         "item/permissions/requestApproval",
+         %{"id" => id, "params" => params} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         true
+       ) do
+    response = permissions_request_approval_response(params)
+    send_message(port, %{"id" => id, "result" => response})
+
+    emit_message(
+      on_message,
+      :approval_auto_approved,
+      %{payload: payload, raw: payload_string, decision: "permissions:session"},
+      metadata
+    )
+
+    :approved
+  end
+
+  defp maybe_handle_approval_request(
+         _port,
+         "item/permissions/requestApproval",
+         _payload,
+         _payload_string,
+         _on_message,
+         _metadata,
+         _tool_executor,
+         false
+       ) do
+    :approval_required
+  end
+
+  defp maybe_handle_approval_request(
+         port,
+         "mcpServer/elicitation/request",
+         %{"id" => id, "params" => params} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         true
+       ) do
+    response = mcp_server_elicitation_response(params)
+    send_message(port, %{"id" => id, "result" => response})
+
+    emit_message(
+      on_message,
+      :mcp_elicitation_auto_answered,
+      %{payload: payload, raw: payload_string, decision: response["action"]},
+      metadata
+    )
+
+    :approved
+  end
+
+  defp maybe_handle_approval_request(
+         _port,
+         "mcpServer/elicitation/request",
+         _payload,
+         _payload_string,
+         _on_message,
+         _metadata,
+         _tool_executor,
+         false
+       ) do
+    :approval_required
+  end
+
+  defp maybe_handle_approval_request(
          _port,
          _method,
          _payload,
@@ -917,6 +989,89 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp tool_request_user_input_unavailable_answers(_params), do: :error
+
+  defp permissions_request_approval_response(%{"permissions" => requested_permissions})
+       when is_map(requested_permissions) do
+    %{
+      "permissions" => grant_requested_permissions(requested_permissions),
+      "scope" => "session"
+    }
+  end
+
+  defp permissions_request_approval_response(_params) do
+    %{"permissions" => %{}, "scope" => "session"}
+  end
+
+  defp grant_requested_permissions(requested_permissions) do
+    requested_permissions
+    |> Enum.reduce(%{}, fn
+      {"network", network_permissions}, acc when is_map(network_permissions) ->
+        Map.put(acc, "network", network_permissions)
+
+      {"fileSystem", file_system_permissions}, acc when is_map(file_system_permissions) ->
+        Map.put(acc, "fileSystem", file_system_permissions)
+
+      _field, acc ->
+        acc
+    end)
+  end
+
+  defp mcp_server_elicitation_response(%{"mode" => "url"}) do
+    %{"action" => "accept", "content" => nil, "_meta" => nil}
+  end
+
+  defp mcp_server_elicitation_response(%{"mode" => "form", "requestedSchema" => schema})
+       when is_map(schema) do
+    %{"action" => "accept", "content" => mcp_elicitation_form_content(schema), "_meta" => nil}
+  end
+
+  defp mcp_server_elicitation_response(_params) do
+    %{"action" => "accept", "content" => %{}, "_meta" => nil}
+  end
+
+  defp mcp_elicitation_form_content(%{"properties" => properties} = schema)
+       when is_map(properties) do
+    required =
+      schema
+      |> Map.get("required", [])
+      |> Enum.filter(&is_binary/1)
+      |> MapSet.new()
+
+    Enum.reduce(properties, %{}, fn {field, field_schema}, acc ->
+      cond do
+        not is_binary(field) ->
+          acc
+
+        not is_map(field_schema) ->
+          acc
+
+        Map.has_key?(field_schema, "default") ->
+          Map.put(acc, field, field_schema["default"])
+
+        MapSet.member?(required, field) ->
+          Map.put(acc, field, mcp_elicitation_field_fallback(field_schema))
+
+        true ->
+          acc
+      end
+    end)
+  end
+
+  defp mcp_elicitation_form_content(_schema), do: %{}
+
+  defp mcp_elicitation_field_fallback(%{"const" => value}), do: value
+
+  defp mcp_elicitation_field_fallback(%{"oneOf" => [first | _]}) when is_map(first),
+    do: mcp_elicitation_field_fallback(first)
+
+  defp mcp_elicitation_field_fallback(%{"anyOf" => [first | _]}) when is_map(first),
+    do: mcp_elicitation_field_fallback(first)
+
+  defp mcp_elicitation_field_fallback(%{"enum" => [first | _]}), do: first
+  defp mcp_elicitation_field_fallback(%{"type" => "boolean"}), do: false
+  defp mcp_elicitation_field_fallback(%{"type" => type}) when type in ["number", "integer"], do: 0
+  defp mcp_elicitation_field_fallback(%{"type" => "array"}), do: []
+  defp mcp_elicitation_field_fallback(_field_schema), do: @non_interactive_tool_input_answer
 
   defp tool_request_user_input_question_id(%{"id" => question_id}) when is_binary(question_id),
     do: {:ok, question_id}
