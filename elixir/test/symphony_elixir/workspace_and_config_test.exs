@@ -1220,6 +1220,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
     assert config.codex.command_timeout_ms == 600_000
+    assert config.server.port == nil
+    assert Config.server_port() == 0
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
@@ -1236,6 +1238,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     config = Config.settings!()
     assert config.agent.max_tokens_per_issue == 500_000
     assert config.agent.max_tokens_per_day == 5_000_000
+
+    write_workflow_file!(Workflow.workflow_file_path(), server_port: 4123)
+    assert Config.server_port() == 4123
+
+    write_workflow_file!(Workflow.workflow_file_path(), observability_enabled: false)
+    assert Config.server_port() == nil
 
     write_workflow_file!(Workflow.workflow_file_path(),
       max_tokens_per_issue: 500_000,

@@ -572,6 +572,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
     assert dashboard_css =~ ":root {"
+    assert dashboard_css =~ "minmax(150px, 1fr)"
     assert dashboard_css =~ ".status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
@@ -868,6 +869,17 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Snapshot unavailable"
     assert html =~ "snapshot_unavailable"
+  end
+
+  test "http server starts on an ephemeral port by default" do
+    orchestrator_name = Module.concat(__MODULE__, :DefaultPortOrchestrator)
+
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: static_snapshot()})
+    start_supervised!({HttpServer, [orchestrator: orchestrator_name, snapshot_timeout_ms: 50]})
+
+    port = wait_for_bound_port()
+    assert is_integer(port)
+    assert port > 0
   end
 
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do

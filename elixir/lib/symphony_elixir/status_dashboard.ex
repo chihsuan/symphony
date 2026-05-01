@@ -446,7 +446,8 @@ defmodule SymphonyElixir.StatusDashboard do
     dashboard_url(Config.settings!().server.host, Config.server_port(), HttpServer.bound_port())
   end
 
-  defp dashboard_url(_host, nil, _bound_port), do: nil
+  defp dashboard_url(_host, nil, nil), do: nil
+  defp dashboard_url(_host, 0, nil), do: nil
 
   defp dashboard_url(host, configured_port, bound_port) do
     port = bound_port || configured_port

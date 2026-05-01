@@ -1504,12 +1504,13 @@ If implemented:
 Extension config:
 
 - `server.port` (integer, OPTIONAL)
-  - Enables the HTTP server extension.
+  - Enables or pins the HTTP server extension, depending on implementation defaults.
   - `0` requests an ephemeral port for local development and tests.
   - CLI `--port` overrides `server.port` when both are present.
 
 Enablement (extension):
 
+- Implementations MAY start the HTTP server by default.
 - Start the HTTP server when a CLI `--port` argument is provided.
 - Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
 - The `server` top-level key is owned by this extension.

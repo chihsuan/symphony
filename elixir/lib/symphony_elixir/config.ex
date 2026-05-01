@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Config do
   No description provided.
   {% endif %}
   """
+  @default_server_port 0
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
@@ -96,7 +97,7 @@ defmodule SymphonyElixir.Config do
   def server_port do
     case Application.get_env(:symphony_elixir, :server_port_override) do
       port when is_integer(port) and port >= 0 -> port
-      _ -> settings!().server.port
+      _ -> default_server_port(settings!())
     end
   end
 
@@ -143,6 +144,14 @@ defmodule SymphonyElixir.Config do
           warn_if_budget_token_reporting_unavailable(settings)
           :ok
         end
+    end
+  end
+
+  defp default_server_port(settings) do
+    cond do
+      not settings.observability.dashboard_enabled -> nil
+      is_integer(settings.server.port) -> settings.server.port
+      true -> @default_server_port
     end
   end
 

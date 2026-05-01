@@ -1699,6 +1699,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "status dashboard prefers the bound server port and normalizes wildcard hosts" do
+    assert StatusDashboard.dashboard_url_for_test("127.0.0.1", 0, nil) == nil
+
     assert StatusDashboard.dashboard_url_for_test("0.0.0.0", 0, 43_123) ==
              "http://127.0.0.1:43123/"
 

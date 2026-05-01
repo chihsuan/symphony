@@ -82,7 +82,7 @@ If no path is passed, Symphony defaults to `./WORKFLOW.md`.
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
-- `--port` also starts the Phoenix observability service (default: disabled)
+- `--port` pins the Phoenix observability service to a specific port
 
 Symphony also keeps an OTP-native durable run store next to the configured log file
 (`run_store/`). It persists run history, retry queue entries, session metadata, and aggregate token
@@ -218,10 +218,12 @@ codex:
   reload error until the file is fixed.
 - `observability.transcript_buffer_size` controls how many recent Codex events each running issue
   keeps for transcript replay. Default: `200`.
-- `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard, transcript view,
-  and JSON API at `/`, `/issues/<issue_identifier>/transcript`, `/api/v1/state`,
-  `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. The state endpoint includes recent durable
-  run history when available.
+- The Phoenix LiveView dashboard, transcript view, and JSON API start by default on an ephemeral
+  local port. Set `server.port` or pass CLI `--port` to pin the port. Set
+  `observability.dashboard_enabled: false` to keep the default observability service off unless
+  `--port` is supplied for that run. The service exposes `/`,
+  `/issues/<issue_identifier>/transcript`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and
+  `/api/v1/refresh`. The state endpoint includes recent durable run history when available.
 
 ## Web dashboard
 
