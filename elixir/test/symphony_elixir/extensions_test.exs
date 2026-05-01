@@ -605,7 +605,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Runtime"
     assert html =~ "Live"
     assert html =~ "Offline"
-    assert html =~ "Copy ID"
+    assert html =~ "thread-h…"
     assert html =~ "Codex update"
     assert html =~ "/issues/MT-HTTP/transcript"
     refute html =~ "data-runtime-clock="
