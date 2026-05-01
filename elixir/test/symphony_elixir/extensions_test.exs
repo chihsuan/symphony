@@ -656,6 +656,36 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
   end
 
+  test "dashboard liveview tolerates snapshots with partial codex totals" do
+    orchestrator_name = Module.concat(__MODULE__, :PartialTotalsDashboardOrchestrator)
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:codex_totals, %{input_tokens: 4, output_tokens: 8, total_tokens: 12})
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["codex_totals"] == %{
+             "input_tokens" => 4,
+             "output_tokens" => 8,
+             "total_tokens" => 12,
+             "seconds_running" => 0
+           }
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Operations Dashboard"
+    assert html =~ "Runtime"
+  end
+
   test "transcript liveview replays buffered events and appends pubsub events" do
     orchestrator_name = Module.concat(__MODULE__, :TranscriptOrchestrator)
 

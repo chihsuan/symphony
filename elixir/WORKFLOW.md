@@ -35,7 +35,7 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh --config 'mcp_servers.playwright.env.PLAYWRIGHT_MCP_HEADLESS="true"' --config 'mcp_servers.playwright.env.PLAYWRIGHT_MCP_ISOLATED="true"' --config 'mcp_servers.playwright.env.PLAYWRIGHT_MCP_TIMEOUT_ACTION="5000"' --config 'mcp_servers.playwright.env.PLAYWRIGHT_MCP_TIMEOUT_NAVIGATION="15000"' app-server
   approval_policy: never
   thread_sandbox: workspace-write
   network_access:

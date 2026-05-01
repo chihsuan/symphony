@@ -60,6 +60,8 @@ defmodule SymphonyElixir.Orchestrator do
     {retry_attempts, claimed} = hydrate_retry_attempts()
     codex_totals = persisted_codex_totals()
 
+    completed_run_metadata = hydrate_completed_run_metadata(retry_attempts)
+
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
       max_concurrent_agents: config.agent.max_concurrent_agents,
@@ -69,6 +71,7 @@ defmodule SymphonyElixir.Orchestrator do
       tick_token: nil,
       claimed: claimed,
       retry_attempts: retry_attempts,
+      completed_run_metadata: completed_run_metadata,
       codex_totals: codex_totals,
       codex_rate_limits: nil
     }
@@ -1292,6 +1295,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp hydrate_retry_attempt(_retry, retry_attempts, claimed, _now, _now_ms), do: {retry_attempts, claimed}
+
+  @watchable_run_statuses ["success", "stopped"]
+
+  defp hydrate_completed_run_metadata(retry_attempts) when is_map(retry_attempts) do
+    case RunStore.list_runs(500) do
+      runs when is_list(runs) ->
+        runs
+        |> Enum.filter(&(Map.get(&1, :status) in @watchable_run_statuses))
+        |> Enum.reject(&Map.has_key?(retry_attempts, Map.get(&1, :issue_id)))
+        |> Enum.filter(&is_binary(Map.get(&1, :issue_id)))
+        |> Enum.group_by(&Map.get(&1, :issue_id))
+        |> Enum.reduce(%{}, fn {issue_id, issue_runs}, acc ->
+          most_recent = List.first(issue_runs)
+
+          metadata = %{
+            identifier: Map.get(most_recent, :issue_identifier),
+            url: nil,
+            last_ran_at: Map.get(most_recent, :ended_at) || Map.get(most_recent, :started_at)
+          }
+
+          Map.put(acc, issue_id, metadata)
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Failed to hydrate completed run metadata from run store: #{inspect(reason)}")
+        %{}
+    end
+  end
+
+  defp hydrate_completed_run_metadata(_retry_attempts), do: %{}
 
   defp retry_due_delay_ms(%DateTime{} = due_at, %DateTime{} = now) do
     max(0, DateTime.diff(due_at, now, :millisecond))

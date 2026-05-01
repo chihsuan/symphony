@@ -624,6 +624,114 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server grants requested permissions when approval policy is never" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-permission-auto-approve-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-719")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-permission-auto-approve.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-permission-auto-approve.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' \"$line\" >> \"$trace_file\"
+
+        case \"$count\" in
+          1)
+            printf '%s\\n' '{\"id\":1,\"result\":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-719\"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-719\"}}}'
+            printf '%s\\n' '{\"id\":109,\"method\":\"item/permissions/requestApproval\",\"params\":{\"threadId\":\"thread-719\",\"turnId\":\"turn-719\",\"itemId\":\"call-719\",\"cwd\":\"/tmp\",\"reason\":\"Browser automation needs access\",\"permissions\":{\"network\":{\"enabled\":true},\"fileSystem\":{\"read\":[\"/tmp\"],\"write\":null,\"globScanMaxDepth\":2,\"entries\":[{\"access\":\"read\",\"path\":{\"type\":\"path\",\"path\":\"/tmp\"}}]}}}}'
+            ;;
+          5)
+            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "never"
+      )
+
+      issue = %Issue{
+        id: "issue-permission-auto-approve",
+        identifier: "MT-719",
+        title: "Auto approve permission request",
+        description: "Ensure app-server permission requests are handled automatically",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-719",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle permission request", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 109 and
+                   get_in(payload, ["result", "scope"]) == "session" and
+                   get_in(payload, ["result", "permissions", "network", "enabled"]) == true and
+                   get_in(payload, [
+                     "result",
+                     "permissions",
+                     "fileSystem",
+                     "entries",
+                     Access.at(0),
+                     "path",
+                     "path"
+                   ]) == "/tmp"
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server auto-approves MCP tool approval prompts when approval policy is never" do
     test_root =
       Path.join(
@@ -714,6 +822,207 @@ defmodule SymphonyElixir.AppServerTest do
                  payload["id"] == 110 and
                    get_in(payload, ["result", "answers", "mcp_tool_call_approval_call-717", "answers"]) ==
                      ["Approve this Session"]
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server auto-accepts URL MCP elicitations when approval policy is never" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-url-elicitation-auto-accept-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-720")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-mcp-url-elicitation-auto-accept.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-mcp-url-elicitation-auto-accept.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-720"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-720"}}}'
+            printf '%s\\n' '{"id":113,"method":"mcpServer/elicitation/request","params":{"threadId":"thread-720","turnId":"turn-720","serverName":"playwright","mode":"url","_meta":null,"message":"Open browser URL","url":"http://127.0.0.1:4107/","elicitationId":"open-browser-url"}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "never"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-url-elicitation-auto-accept",
+        identifier: "MT-720",
+        title: "Auto accept URL MCP elicitation",
+        description: "Ensure URL elicitations continue automatically",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-720",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle URL elicitation", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 113 and
+                   get_in(payload, ["result", "action"]) == "accept" and
+                   get_in(payload, ["result", "content"]) == nil and
+                   get_in(payload, ["result", "_meta"]) == nil
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server auto-accepts form MCP elicitations when approval policy is never" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-form-elicitation-auto-accept-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-721")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-mcp-form-elicitation-auto-accept.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-mcp-form-elicitation-auto-accept.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-721"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-721"}}}'
+            printf '%s\\n' '{"id":114,"method":"mcpServer/elicitation/request","params":{"threadId":"thread-721","turnId":"turn-721","serverName":"playwright","mode":"form","_meta":null,"message":"Allow browser automation","requestedSchema":{"type":"object","properties":{"reason":{"type":"string"},"remember":{"type":"boolean","default":true}},"required":["reason"]}}}'
+            ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "never"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-form-elicitation-auto-accept",
+        identifier: "MT-721",
+        title: "Auto accept form MCP elicitation",
+        description: "Ensure form elicitations continue automatically",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-721",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle form elicitation", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 114 and
+                   get_in(payload, ["result", "action"]) == "accept" and
+                   get_in(payload, ["result", "content", "reason"]) ==
+                     "This is a non-interactive session. Operator input is unavailable." and
+                   get_in(payload, ["result", "content", "remember"]) == true
                else
                  false
                end
