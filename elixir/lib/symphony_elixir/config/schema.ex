@@ -180,6 +180,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:command_timeout_ms, :integer, default: 600_000)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -194,7 +195,8 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_sandbox_policy,
           :turn_timeout_ms,
           :read_timeout_ms,
-          :stall_timeout_ms
+          :stall_timeout_ms,
+          :command_timeout_ms
         ],
         empty_values: []
       )
@@ -202,6 +204,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:command_timeout_ms, greater_than_or_equal_to: 0)
     end
   end
 
@@ -691,16 +694,12 @@ defmodule SymphonyElixir.Config.Schema do
 
     prepend_roots = Enum.reject(prepend_roots, &is_nil/1)
 
-    if prepend_roots == [] and not Map.has_key?(policy, "writableRoots") do
+    writable_roots =
       policy
-    else
-      writable_roots =
-        policy
-        |> Map.get("writableRoots", [])
-        |> normalize_writable_roots(opts)
+      |> Map.get("writableRoots", [])
+      |> normalize_writable_roots(opts)
 
-      Map.put(policy, "writableRoots", Enum.uniq(prepend_roots ++ writable_roots))
-    end
+    Map.put(policy, "writableRoots", Enum.uniq(prepend_roots ++ writable_roots))
   end
 
   defp ensure_workspace_write_roots(policy, _settings, _workspace, _opts), do: policy

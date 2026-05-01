@@ -230,6 +230,28 @@ defmodule SymphonyElixir.CoreTest do
     GenServer.stop(pid)
   end
 
+  test "application suppresses orchestration for nested non-test agent runtimes" do
+    nested_children =
+      SymphonyElixir.Application.child_specs_for_runtime(%{
+        "SYMPHONY_AGENT_RUNTIME" => "1",
+        "MIX_ENV" => "dev"
+      })
+
+    refute SymphonyElixir.Orchestrator in nested_children
+    refute SymphonyElixir.RunStore in nested_children
+    refute SymphonyElixir.HttpServer in nested_children
+    refute SymphonyElixir.StatusDashboard in nested_children
+    assert SymphonyElixir.WorkflowStore in nested_children
+
+    test_children =
+      SymphonyElixir.Application.child_specs_for_runtime(%{
+        "SYMPHONY_AGENT_RUNTIME" => "1",
+        "MIX_ENV" => "test"
+      })
+
+    assert SymphonyElixir.Orchestrator in test_children
+  end
+
   test "linear issue state reconciliation fetch with no running issues is a no-op" do
     assert {:ok, []} = Client.fetch_issue_states_by_ids([])
   end
