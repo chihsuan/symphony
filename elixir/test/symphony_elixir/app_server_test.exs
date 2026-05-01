@@ -198,6 +198,153 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server marks child processes as Symphony agent runtime" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-agent-runtime-env-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1002")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-agent-runtime-env.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-agent-runtime-env.trace}"
+      printf 'ENV:%s\\n' "$SYMPHONY_AGENT_RUNTIME" >> "$trace_file"
+      count=0
+
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1002"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1002"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-agent-runtime-env",
+        identifier: "MT-1002",
+        title: "Validate agent runtime marker",
+        description: "Ensure Codex child processes can suppress nested orchestration",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1002",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate runtime marker", issue)
+      assert File.read!(trace_file) =~ "ENV:1"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server times out one command even when the turn remains active" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-command-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1003")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1003"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1003"}}}'
+            printf '%s\\n' '{"method":"item/started","params":{"item":{"id":"cmd-timeout","type":"commandExecution","status":"running","command":"mix run --no-halt"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_command_timeout_ms: 10,
+        codex_turn_timeout_ms: 10_000
+      )
+
+      issue = %Issue{
+        id: "issue-command-timeout",
+        identifier: "MT-1003",
+        title: "Validate command timeout",
+        description: "Ensure long-running commands cannot stream forever",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1003",
+        labels: ["backend"]
+      }
+
+      assert {:error, {:command_timeout, details}} =
+               AppServer.run(workspace, "Validate command timeout", issue)
+
+      assert details.command == "mix run --no-halt"
+      assert details.elapsed_ms >= 10
+      assert details.timeout_ms == 10
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(

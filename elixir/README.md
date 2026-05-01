@@ -147,6 +147,8 @@ Notes:
     matching the previous broad `networkAccess: true` behavior.
   - `block`: disables the Codex sandbox network switch, matching `networkAccess: false`.
   `denied_domains` always takes precedence over built-in and user-provided `allowed_domains`.
+- `codex.command_timeout_ms` caps a single shell command even when it keeps streaming output.
+  Default: `600000` (10 minutes). Set `0` to disable this command-level guard.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony forwards the configured map to
   Codex, but for `workspaceWrite` policies it ensures the current issue workspace stays in
   `writableRoots` at runtime when a workspace path is available. Symphony always includes the

@@ -1170,6 +1170,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
+      codex_command_timeout_ms: nil,
       tracker_api_token: nil,
       tracker_project_slug: nil
     )
@@ -1214,6 +1215,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+    assert config.codex.command_timeout_ms == 600_000
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
@@ -1290,6 +1292,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_command_timeout_ms: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.command_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(), workspace_strategy: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1894,7 +1900,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       workspace_root = Path.join(test_root, "workspaces")
       issue_workspace = Path.join(workspace_root, "MT-NS")
-      invalid_root = Path.join(System.tmp_dir!(), String.duplicate("a", 300))
+      invalid_root = Path.join(test_root, String.duplicate("a", 300))
       File.mkdir_p!(issue_workspace)
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1922,21 +1928,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert policy["writableRoots"] == [canonical_workspace, canonical_workspace_git, "relative/path"]
 
-      non_list_policy_settings = %{
+      invalid_root_settings = %{
         settings
         | codex: %{
             settings.codex
             | turn_sandbox_policy: %{
                 "type" => "workspaceWrite",
-                "writableRoots" => "relative/path"
+                "writableRoots" => [invalid_root]
               }
           }
       }
 
-      assert {:ok, non_list_policy} =
-               Schema.resolve_runtime_turn_sandbox_policy(non_list_policy_settings, issue_workspace)
+      assert {:ok, invalid_root_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(invalid_root_settings, issue_workspace)
 
-      assert non_list_policy["writableRoots"] == [canonical_workspace, canonical_workspace_git]
+      assert invalid_root_policy["writableRoots"] == [canonical_workspace, canonical_workspace_git]
+
+      invalid_roots_settings = %{
+        settings
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{
+                "type" => "workspaceWrite",
+                "writableRoots" => "not-a-list"
+              }
+          }
+      }
+
+      assert {:ok, invalid_roots_policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(invalid_roots_settings, issue_workspace)
+
+      assert invalid_roots_policy["writableRoots"] == [canonical_workspace, canonical_workspace_git]
     after
       File.rm_rf(test_root)
     end

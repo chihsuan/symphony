@@ -11,6 +11,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   @turn_start_id 3
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
+  @agent_runtime_env "SYMPHONY_AGENT_RUNTIME"
+  @agent_runtime_env_value "1"
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
 
   @type session :: %{
@@ -201,6 +203,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :stderr_to_stdout,
             args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
             cd: String.to_charlist(workspace),
+            env: agent_runtime_env(),
             line: @port_line_bytes
           ]
         )
@@ -217,9 +220,13 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp remote_launch_command(workspace) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      "#{@agent_runtime_env}=#{@agent_runtime_env_value} exec #{Config.settings!().codex.command}"
     ]
     |> Enum.join(" && ")
+  end
+
+  defp agent_runtime_env do
+    [{String.to_charlist(@agent_runtime_env), String.to_charlist(@agent_runtime_env_value)}]
   end
 
   defp port_metadata(port, worker_host) when is_port(port) do
@@ -341,21 +348,33 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+    config = Config.settings!().codex
+
     receive_loop(
       port,
       on_message,
-      Config.settings!().codex.turn_timeout_ms,
+      config.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      initial_turn_stream_state(config.command_timeout_ms)
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, turn_stream_state) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          turn_stream_state
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -364,18 +383,22 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          turn_stream_state
         )
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
     after
-      timeout_ms ->
-        {:error, :turn_timeout}
+      receive_timeout_ms(timeout_ms, turn_stream_state) ->
+        case command_timeout_error(turn_stream_state) do
+          {:error, reason} -> {:error, reason}
+          :ok -> {:error, :turn_timeout}
+        end
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests, turn_stream_state) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -415,9 +438,12 @@ defmodule SymphonyElixir.Codex.AppServer do
           payload,
           payload_string,
           method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests
+          %{
+            timeout_ms: timeout_ms,
+            tool_executor: tool_executor,
+            auto_approve_requests: auto_approve_requests,
+            turn_stream_state: turn_stream_state
+          }
         )
 
       {:ok, payload} ->
@@ -431,7 +457,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, turn_stream_state)
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -448,7 +474,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, turn_stream_state)
     end
   end
 
@@ -471,9 +497,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          payload,
          payload_string,
          method,
-         timeout_ms,
-         tool_executor,
-         auto_approve_requests
+         stream_context
        ) do
     metadata = metadata_from_message(port, payload)
 
@@ -484,8 +508,8 @@ defmodule SymphonyElixir.Codex.AppServer do
            payload_string,
            on_message,
            metadata,
-           tool_executor,
-           auto_approve_requests
+           stream_context.tool_executor,
+           stream_context.auto_approve_requests
          ) do
       :input_required ->
         emit_message(
@@ -498,7 +522,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        continue_or_timeout(port, on_message, stream_context, method, payload)
 
       :approval_required ->
         emit_message(
@@ -532,7 +556,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          continue_or_timeout(port, on_message, stream_context, method, payload)
         end
     end
   end
@@ -932,6 +956,177 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     String.starts_with?(normalized_label, "approve") or String.starts_with?(normalized_label, "allow")
   end
+
+  defp initial_turn_stream_state(command_timeout_ms) do
+    %{
+      command_timeout_ms: normalize_command_timeout_ms(command_timeout_ms),
+      active_command: nil
+    }
+  end
+
+  defp normalize_command_timeout_ms(timeout_ms) when is_integer(timeout_ms), do: timeout_ms
+  defp normalize_command_timeout_ms(_timeout_ms), do: 0
+
+  defp continue_or_timeout(port, on_message, stream_context, method, payload) do
+    turn_stream_state =
+      update_command_tracking(stream_context.turn_stream_state, method, payload)
+
+    case command_timeout_error(turn_stream_state) do
+      :ok ->
+        receive_loop(
+          port,
+          on_message,
+          stream_context.timeout_ms,
+          "",
+          stream_context.tool_executor,
+          stream_context.auto_approve_requests,
+          turn_stream_state
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp receive_timeout_ms(turn_timeout_ms, %{active_command: nil}), do: turn_timeout_ms
+
+  defp receive_timeout_ms(turn_timeout_ms, %{active_command: %{started_at_ms: started_at_ms}, command_timeout_ms: command_timeout_ms})
+       when is_integer(started_at_ms) and is_integer(command_timeout_ms) and command_timeout_ms > 0 do
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at_ms
+    min(turn_timeout_ms, max(0, command_timeout_ms - elapsed_ms))
+  end
+
+  defp receive_timeout_ms(turn_timeout_ms, _turn_stream_state), do: turn_timeout_ms
+
+  defp command_timeout_error(%{active_command: nil}), do: :ok
+  defp command_timeout_error(%{command_timeout_ms: timeout_ms}) when timeout_ms <= 0, do: :ok
+
+  defp command_timeout_error(%{
+         active_command: %{started_at_ms: started_at_ms} = active_command,
+         command_timeout_ms: timeout_ms
+       })
+       when is_integer(started_at_ms) and is_integer(timeout_ms) do
+    elapsed_ms = max(0, System.monotonic_time(:millisecond) - started_at_ms)
+
+    if elapsed_ms >= timeout_ms do
+      {:error,
+       {:command_timeout,
+        %{
+          command: Map.get(active_command, :command),
+          elapsed_ms: elapsed_ms,
+          timeout_ms: timeout_ms
+        }}}
+    else
+      :ok
+    end
+  end
+
+  defp command_timeout_error(_turn_stream_state), do: :ok
+
+  defp update_command_tracking(turn_stream_state, "item/commandExecution/requestApproval", payload) do
+    start_command_tracking(turn_stream_state, command_from_payload(payload))
+  end
+
+  defp update_command_tracking(turn_stream_state, "item/started", payload) do
+    if command_execution_item?(payload) do
+      start_command_tracking(turn_stream_state, command_from_payload(payload))
+    else
+      turn_stream_state
+    end
+  end
+
+  defp update_command_tracking(turn_stream_state, "item/completed", payload) do
+    if command_execution_item?(payload) do
+      complete_command_tracking(turn_stream_state)
+    else
+      turn_stream_state
+    end
+  end
+
+  defp update_command_tracking(turn_stream_state, "codex/event/exec_command_begin", payload) do
+    start_command_tracking(turn_stream_state, command_from_payload(payload))
+  end
+
+  defp update_command_tracking(turn_stream_state, "codex/event/exec_command_end", _payload) do
+    complete_command_tracking(turn_stream_state)
+  end
+
+  defp update_command_tracking(turn_stream_state, _method, _payload), do: turn_stream_state
+
+  defp start_command_tracking(turn_stream_state, command) do
+    Map.put(turn_stream_state, :active_command, %{
+      command: command,
+      started_at_ms: System.monotonic_time(:millisecond)
+    })
+  end
+
+  defp complete_command_tracking(turn_stream_state), do: Map.put(turn_stream_state, :active_command, nil)
+
+  defp command_execution_item?(payload) do
+    payload
+    |> item_type()
+    |> case do
+      "commandExecution" -> true
+      "command_execution" -> true
+      _ -> false
+    end
+  end
+
+  defp item_type(payload) do
+    get_in(payload, ["params", "item", "type"]) ||
+      get_in(payload, ["params", "msg", "payload", "type"])
+  end
+
+  defp command_from_payload(payload) do
+    [
+      ["params", "parsedCmd"],
+      ["params", "command"],
+      ["params", "cmd"],
+      ["params", "argv"],
+      ["params", "args"],
+      ["params", "item", "command"],
+      ["params", "item", "parsedCmd"],
+      ["params", "msg", "command"],
+      ["params", "msg", "parsed_cmd"],
+      ["params", "msg", "payload", "command"],
+      ["params", "msg", "payload", "parsed_cmd"]
+    ]
+    |> Enum.find_value(&get_in(payload, &1))
+    |> normalize_command()
+  end
+
+  defp normalize_command(%{} = command) do
+    binary_command = command["parsedCmd"] || command["command"] || command["cmd"]
+    args = command["args"] || command["argv"]
+
+    if is_binary(binary_command) and is_list(args) do
+      normalize_command([binary_command | args])
+    else
+      normalize_command(binary_command || args)
+    end
+  end
+
+  defp normalize_command(command) when is_binary(command) do
+    command
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp normalize_command(command) when is_list(command) do
+    if Enum.all?(command, &is_binary/1) do
+      command
+      |> Enum.join(" ")
+      |> normalize_command()
+    else
+      nil
+    end
+  end
+
+  defp normalize_command(_command), do: nil
 
   defp await_response(port, request_id) do
     with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
