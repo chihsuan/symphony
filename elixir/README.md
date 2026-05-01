@@ -168,7 +168,10 @@ Notes:
 - `agent.max_tokens_per_issue` and `agent.max_tokens_per_day` are optional guardrails. When omitted,
   no token budget is enforced. The per-issue limit stops only the over-budget issue without retrying;
   the daily limit pauses new dispatch for the UTC day while allowing already-running agents to
-  continue.
+  continue. Budget enforcement depends on Codex app-server token reporting, so Symphony warns if
+  either budget is configured with a command that may not report token usage. Per-issue exhausted
+  runs are rehydrated from run history across restarts while the current limit still applies; raising
+  or removing the per-issue limit lets the issue dispatch again.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

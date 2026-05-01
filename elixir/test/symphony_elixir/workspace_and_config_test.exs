@@ -1250,6 +1250,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert warning =~ "agent.max_tokens_per_issue is configured"
     assert warning =~ "may not report token usage"
 
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_tokens_per_day: 5_000_000,
+      codex_command: "codex run"
+    )
+
+    warning =
+      capture_log(fn ->
+        assert :ok = Config.validate!()
+      end)
+
+    assert warning =~ "agent.max_tokens_per_day is configured"
+    assert warning =~ "may not report token usage"
+
     explicit_root =
       Path.join(
         System.tmp_dir!(),

@@ -1370,10 +1370,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp hydrate_budget_exhausted do
+    case Config.settings!().agent.max_tokens_per_issue do
+      limit when is_integer(limit) and limit > 0 ->
+        hydrate_budget_exhausted(limit)
+
+      _limit ->
+        MapSet.new()
+    end
+  end
+
+  defp hydrate_budget_exhausted(limit) do
     case RunStore.list_runs(:all) do
       runs when is_list(runs) ->
         runs
-        |> Enum.flat_map(&budget_exhausted_issue_id/1)
+        |> Enum.flat_map(&budget_exhausted_issue_id(&1, limit))
         |> MapSet.new()
 
       {:error, reason} ->
@@ -1382,11 +1392,18 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp budget_exhausted_issue_id(%{status: "budget_exhausted", issue_id: issue_id})
+  defp budget_exhausted_issue_id(%{status: "budget_exhausted", issue_id: issue_id} = run, limit)
        when is_binary(issue_id),
-       do: [issue_id]
+       do: if(budget_exhausted_run_over_limit?(run, limit), do: [issue_id], else: [])
 
-  defp budget_exhausted_issue_id(_run), do: []
+  defp budget_exhausted_issue_id(_run, _limit), do: []
+
+  defp budget_exhausted_run_over_limit?(%{tokens: %{total_tokens: total}}, limit)
+       when is_integer(total) do
+    max(total, 0) >= limit
+  end
+
+  defp budget_exhausted_run_over_limit?(_run, _limit), do: true
 
   defp run_started_on_day?(%{started_at: %DateTime{} = started_at}, %Date{} = day) do
     DateTime.to_date(started_at) == day

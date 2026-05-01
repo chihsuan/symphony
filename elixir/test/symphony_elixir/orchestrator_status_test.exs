@@ -1043,6 +1043,82 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute snapshot.budget.daily_paused
   end
 
+  test "orchestrator rehydrates budget-exhausted issues across restarts while the limit still applies" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_issue: 10
+    )
+
+    issue_id = "issue-budget-hydrate"
+
+    assert :ok =
+             put_budget_exhausted_run(%{
+               run_id: "run-budget-hydrate",
+               issue_id: issue_id,
+               issue_identifier: "MT-BUDGET-H",
+               total_tokens: 12,
+               started_at: DateTime.add(DateTime.utc_now(), -86_400, :second)
+             })
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BUDGET-H",
+      title: "Budget hydrate",
+      description: "Stay blocked after restart",
+      state: "Todo",
+      url: "https://example.org/issues/MT-BUDGET-H"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BudgetHydrateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    state = :sys.get_state(pid)
+
+    assert state.budget_daily_used == 0
+    assert MapSet.member?(state.budget_exhausted, issue_id)
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "orchestrator skips persisted budget-exhausted issues when the current limit no longer applies" do
+    issue_id = "issue-budget-raised"
+
+    assert :ok =
+             put_budget_exhausted_run(%{
+               run_id: "run-budget-raised",
+               issue_id: issue_id,
+               issue_identifier: "MT-BUDGET-R",
+               total_tokens: 12,
+               started_at: DateTime.utc_now()
+             })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_tokens_per_issue: 20
+    )
+
+    raised_limit_orchestrator_name = Module.concat(__MODULE__, :BudgetRaisedLimitOrchestrator)
+    {:ok, raised_limit_pid} = Orchestrator.start_link(name: raised_limit_orchestrator_name)
+
+    raised_limit_state = :sys.get_state(raised_limit_pid)
+    refute MapSet.member?(raised_limit_state.budget_exhausted, issue_id)
+
+    GenServer.stop(raised_limit_pid)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    unset_limit_orchestrator_name = Module.concat(__MODULE__, :BudgetUnsetLimitOrchestrator)
+    {:ok, unset_limit_pid} = Orchestrator.start_link(name: unset_limit_orchestrator_name)
+
+    unset_limit_state = :sys.get_state(unset_limit_pid)
+    refute MapSet.member?(unset_limit_state.budget_exhausted, issue_id)
+
+    GenServer.stop(unset_limit_pid)
+  end
+
   test "orchestrator snapshot includes retry backoff entries" do
     orchestrator_name = Module.concat(__MODULE__, :RetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -2165,6 +2241,24 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp put_budget_exhausted_run(attrs) do
+    total_tokens = Map.fetch!(attrs, :total_tokens)
+
+    RunStore.put_run(%{
+      run_id: Map.fetch!(attrs, :run_id),
+      issue_id: Map.fetch!(attrs, :issue_id),
+      issue_identifier: Map.fetch!(attrs, :issue_identifier),
+      title: "Budget exhausted",
+      state: "Todo",
+      status: "budget_exhausted",
+      attempt: 1,
+      started_at: Map.fetch!(attrs, :started_at),
+      ended_at: DateTime.utc_now(),
+      error: "token budget exhausted",
+      tokens: %{input_tokens: total_tokens, output_tokens: 0, total_tokens: total_tokens}
+    })
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do

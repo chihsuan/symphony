@@ -309,4 +309,7 @@ If Symphony documents token reporting externally, the contract should be:
 totals described above. When a per-issue limit is configured, Symphony stops only the issue whose
 running total reaches the limit and does not schedule a retry. When a daily limit is configured,
 Symphony pauses new dispatch after the UTC-day total reaches the limit, while already-running agents
-continue to report tokens and finish normally.
+continue to report tokens and finish normally. Daily usage resets at UTC day boundaries, but
+per-issue budget exhaustion is persisted in run history and rehydrated across restarts while the
+current per-issue limit is still exceeded. Operators can allow a stopped issue to dispatch again by
+raising or removing `agent.max_tokens_per_issue`.

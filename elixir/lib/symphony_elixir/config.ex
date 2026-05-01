@@ -147,13 +147,25 @@ defmodule SymphonyElixir.Config do
   end
 
   defp warn_if_budget_token_reporting_unavailable(%Schema{} = settings) do
-    agent = settings.agent
+    budget_keys = configured_budget_keys(settings.agent)
 
-    if is_integer(agent.max_tokens_per_issue) and not codex_app_server_command?(settings.codex.command) do
-      Logger.warning("agent.max_tokens_per_issue is configured but codex.command may not report token usage command=#{inspect(settings.codex.command)}")
+    if budget_keys != [] and not codex_app_server_command?(settings.codex.command) do
+      Logger.warning("#{budget_warning_subject(budget_keys)} but codex.command may not report token usage command=#{inspect(settings.codex.command)}")
     end
 
     :ok
+  end
+
+  defp budget_warning_subject([budget_key]), do: "#{budget_key} is configured"
+  defp budget_warning_subject(budget_keys), do: "#{Enum.join(budget_keys, ", ")} are configured"
+
+  defp configured_budget_keys(agent) do
+    [
+      {"agent.max_tokens_per_issue", agent.max_tokens_per_issue},
+      {"agent.max_tokens_per_day", agent.max_tokens_per_day}
+    ]
+    |> Enum.filter(fn {_key, value} -> is_integer(value) end)
+    |> Enum.map(fn {key, _value} -> key end)
   end
 
   defp codex_app_server_command?(command) when is_binary(command) do

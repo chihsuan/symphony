@@ -1469,6 +1469,9 @@ Implementations MAY support optional token budget limits in `WORKFLOW.md`:
     stopped without scheduling a retry.
   - The run SHOULD be recorded with an implementation-defined budget-exhausted status and enough
     issue/session/token context for operators to understand why it stopped.
+  - Implementations MAY rehydrate budget-exhausted status across restarts to avoid redispatching the
+    same over-budget issue. If they do, they SHOULD ignore persisted budget-exhausted records when
+    the per-issue limit is no longer configured or is raised above the recorded token total.
 - `agent.max_tokens_per_day` (positive integer, OPTIONAL)
   - When omitted, no daily dispatch budget is enforced.
   - When configured, new dispatch SHOULD pause once the UTC-day token total reaches the limit.
