@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixirWeb.ObservabilityPubSub
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -67,25 +69,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     now = DateTime.utc_now()
 
-    send(
-      pid,
-      {:codex_worker_update, issue_id,
-       %{
-         event: :session_started,
-         session_id: "thread-live-turn-live",
-         timestamp: now
-       }}
-    )
+    session_update = %{
+      event: :session_started,
+      session_id: "thread-live-turn-live",
+      timestamp: now
+    }
 
-    send(
-      pid,
-      {:codex_worker_update, issue_id,
-       %{
-         event: :notification,
-         payload: %{method: "some-event"},
-         timestamp: now
-       }}
-    )
+    notification_update = %{
+      event: :notification,
+      payload: %{method: "some-event"},
+      timestamp: now
+    }
+
+    assert :ok = ObservabilityPubSub.subscribe_transcript(issue_id)
+
+    send(pid, {:codex_worker_update, issue_id, session_update})
+    assert_receive {:transcript_event, ^session_update}
+
+    send(pid, {:codex_worker_update, issue_id, notification_update})
+    assert_receive {:transcript_event, ^notification_update}
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
@@ -99,6 +101,69 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              message: %{method: "some-event"},
              timestamp: now
            }
+
+    assert snapshot_entry.transcript_buffer == [session_update, notification_update]
+    assert snapshot_entry.transcript_buffer_size == 2
+  end
+
+  test "orchestrator transcript buffer is bounded by observability config" do
+    write_workflow_file!(Workflow.workflow_file_path(), observability_transcript_buffer_size: 2)
+
+    issue_id = "issue-bounded-transcript"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-189",
+      title: "Bounded transcript test",
+      description: "Keep only recent transcript events",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-189"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BoundedTranscriptOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    updates =
+      Enum.map(1..4, fn index ->
+        %{event: "event-#{index}", payload: %{index: index}, timestamp: DateTime.utc_now()}
+      end)
+
+    Enum.each(updates, fn update ->
+      send(pid, {:codex_worker_update, issue_id, update})
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert Enum.map(snapshot_entry.transcript_buffer, & &1.event) == ["event-3", "event-4"]
+    assert snapshot_entry.transcript_buffer_size == 2
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
@@ -1339,6 +1404,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
+          {:error, :not_found} -> :ok
         end
       end
     end)

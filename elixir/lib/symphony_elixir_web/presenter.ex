@@ -53,6 +53,40 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
+  @spec transcript_payload(String.t(), GenServer.name(), timeout()) ::
+          {:ok, map()} | {:error, :issue_not_found | :snapshot_unavailable}
+  def transcript_payload(issue_identifier, orchestrator, snapshot_timeout_ms)
+      when is_binary(issue_identifier) do
+    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
+      %{} = snapshot ->
+        case Enum.find(snapshot.running, &(&1.identifier == issue_identifier)) do
+          nil ->
+            {:error, :issue_not_found}
+
+          running ->
+            {:ok,
+             %{
+               issue_id: running.issue_id,
+               issue_identifier: running.identifier,
+               state: running.state,
+               session_id: running.session_id,
+               started_at: iso8601(running.started_at),
+               last_event_at: iso8601(running.last_codex_timestamp),
+               turn_count: Map.get(running, :turn_count, 0),
+               tokens: %{
+                 input_tokens: running.codex_input_tokens,
+                 output_tokens: running.codex_output_tokens,
+                 total_tokens: running.codex_total_tokens
+               },
+               events: transcript_events(running)
+             }}
+        end
+
+      _ ->
+        {:error, :snapshot_unavailable}
+    end
+  end
+
   @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
   def refresh_payload(orchestrator) do
     case Orchestrator.request_refresh(orchestrator) do
@@ -241,6 +275,9 @@ defmodule SymphonyElixirWeb.Presenter do
     ]
     |> Enum.reject(&is_nil(&1.at))
   end
+
+  defp transcript_events(%{transcript_buffer: events}) when is_list(events), do: events
+  defp transcript_events(_running), do: []
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)

@@ -9,6 +9,15 @@ defmodule SymphonyElixir.ObservabilityPubSubTest do
     assert_receive :observability_updated
   end
 
+  test "subscribe_transcript and broadcast_transcript_event deliver issue events" do
+    event = %{event: :notification, payload: %{message: "live"}, timestamp: DateTime.utc_now()}
+
+    assert :ok = ObservabilityPubSub.subscribe_transcript("issue-123")
+    assert :ok = ObservabilityPubSub.broadcast_transcript_event("issue-123", event)
+    assert_receive {:transcript_event, ^event}
+    assert :ok = ObservabilityPubSub.broadcast_transcript_event("issue-123", :not_an_event)
+  end
+
   test "broadcast_update is a no-op when pubsub is unavailable" do
     pubsub_child_id = Phoenix.PubSub.Supervisor
 
@@ -24,5 +33,6 @@ defmodule SymphonyElixir.ObservabilityPubSubTest do
     refute Process.whereis(SymphonyElixir.PubSub)
 
     assert :ok = ObservabilityPubSub.broadcast_update()
+    assert :ok = ObservabilityPubSub.broadcast_transcript_event("issue-123", %{event: :notification})
   end
 end
