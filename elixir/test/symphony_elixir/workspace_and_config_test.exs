@@ -1732,6 +1732,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.codex_built_in_network_allowed_domains()
   end
 
+  test "schema network helpers fail on malformed embedded network config" do
+    settings = %Schema{
+      codex: %Codex{network_access: %{mode: "open"}},
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert_raise FunctionClauseError, fn ->
+      Schema.codex_effective_network_allowed_domains(settings)
+    end
+  end
+
   test "runtime sandbox policy keeps workspaceWrite policy rootless when no workspace is available" do
     settings = %Schema{
       codex: %Codex{

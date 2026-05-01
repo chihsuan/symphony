@@ -599,7 +599,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp codex_network_access(%Codex.NetworkAccess{} = network_access), do: network_access
-  defp codex_network_access(_network_access), do: %Codex.NetworkAccess{}
+  defp codex_network_access(nil), do: %Codex.NetworkAccess{}
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
