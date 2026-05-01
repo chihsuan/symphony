@@ -4,7 +4,7 @@ defmodule SymphonyElixir.GitHub.PullRequestTest do
   alias SymphonyElixir.GitHub.PullRequest
 
   test "fetch_activity separates review timestamps from PR updates and supports enterprise hosts" do
-    pr_url = "https://github.a8c.com/Automattic/symphony/pull/42"
+    pr_url = "https://github.example.com/org/repo/pull/42"
 
     runner = fn
       ["pr", "view", ^pr_url, "--json", fields], opts ->
@@ -29,7 +29,7 @@ defmodule SymphonyElixir.GitHub.PullRequestTest do
            "url" => pr_url
          }), 0}
 
-      ["api", "--hostname", "github.a8c.com", "repos/Automattic/symphony/pulls/42/comments"], opts ->
+      ["api", "--hostname", "github.example.com", "repos/org/repo/pulls/42/comments"], opts ->
         assert opts[:stderr_to_stdout]
 
         {Jason.encode!([

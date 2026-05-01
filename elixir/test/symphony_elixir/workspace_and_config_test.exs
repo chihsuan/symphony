@@ -478,7 +478,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           },
           %{
             "title" => "Pull Request #124",
-            "url" => "https://github.a8c.com/Automattic/symphony/pull/124",
+            "url" => "https://github.example.com/org/repo/pull/124",
             "sourceType" => "github"
           },
           %{
@@ -525,7 +525,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert issue.pr_urls == [
              "https://github.com/example/repo/pull/123",
-             "https://github.a8c.com/Automattic/symphony/pull/124"
+             "https://github.example.com/org/repo/pull/124"
            ]
 
     assert issue.assignee_id == "user-1"
