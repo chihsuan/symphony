@@ -73,6 +73,35 @@ defmodule SymphonyElixir.RunStoreTest do
     assert :ok = RunStore.delete_retry("issue-1")
     assert [] = RunStore.list_retries()
 
+    assert :ok =
+             RunStore.put_pr_lifecycle(%{
+               issue_id: "issue-1",
+               issue_identifier: "RSM-1",
+               pr_url: "https://github.com/example/repo/pull/1",
+               workspace_path: "/tmp/workspaces/RSM-1",
+               status: "watching",
+               updated_at: started_at
+             })
+
+    assert :ok =
+             RunStore.update_pr_lifecycle("issue-1", %{
+               status: "cooling_down",
+               last_activity_at: due_at
+             })
+
+    assert [
+             %{
+               issue_id: "issue-1",
+               pr_url: "https://github.com/example/repo/pull/1",
+               workspace_path: "/tmp/workspaces/RSM-1",
+               status: "cooling_down",
+               last_activity_at: ^due_at
+             }
+           ] = RunStore.list_pr_lifecycles()
+
+    assert :ok = RunStore.delete_pr_lifecycle("issue-1")
+    assert [] = RunStore.list_pr_lifecycles()
+
     totals = %{input_tokens: 10, output_tokens: 4, total_tokens: 14, seconds_running: 10}
     assert :ok = RunStore.put_codex_totals(totals)
     assert totals == RunStore.get_codex_totals()

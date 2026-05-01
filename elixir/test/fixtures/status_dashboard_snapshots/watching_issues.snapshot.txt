@@ -16,8 +16,8 @@
 │
 │   \e[90mID       STATE          LAST RUN     LINEAR URL                                                            \e[0m
 │   \e[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────\e[0m
-│ \e[34m◌\e[0m \e[36mMT-902  \e[0m \e[33mHuman Review  \e[0m \e[35m45m ago     \e[0m \e[36mhttps://linear.app/a8c/issue/MT-902                                   \e[0m
-│ \e[34m◌\e[0m \e[36mMT-901  \e[0m \e[33mIn Review     \e[0m \e[35m2h ago      \e[0m \e[36mhttps://linear.app/a8c/issue/MT-901                                   \e[0m
+│ \e[34m◌\e[0m \e[36mMT-902  \e[0m \e[33mHuman Review  \e[0m \e[35m45m ago     \e[0m \e[36mhttps://linear.app/example/issue/MT-902                               \e[0m
+│ \e[34m◌\e[0m \e[36mMT-901  \e[0m \e[33mIn Review     \e[0m \e[35m2h ago      \e[0m \e[36mhttps://linear.app/example/issue/MT-901                               \e[0m
 │
 \e[1m├─ Backoff queue\e[0m
 │

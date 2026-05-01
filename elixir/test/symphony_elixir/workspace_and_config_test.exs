@@ -469,6 +469,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "state" => %{"name" => "Todo"},
       "branchName" => "mt-1",
       "url" => "https://example.org/issues/MT-1",
+      "attachments" => %{
+        "nodes" => [
+          %{
+            "title" => "Pull Request #123",
+            "url" => "https://github.com/example/repo/pull/123",
+            "sourceType" => "github"
+          },
+          %{
+            "title" => "Pull Request #124",
+            "url" => "https://github.example.com/org/repo/pull/124",
+            "sourceType" => "github"
+          },
+          %{
+            "title" => "Design",
+            "url" => "https://example.org/design",
+            "sourceType" => "figma"
+          }
+        ]
+      },
       "assignee" => %{
         "id" => "user-1"
       },
@@ -503,6 +522,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+
+    assert issue.pr_urls == [
+             "https://github.com/example/repo/pull/123",
+             "https://github.example.com/org/repo/pull/124"
+           ]
+
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
   end

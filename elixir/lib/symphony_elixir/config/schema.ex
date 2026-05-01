@@ -377,6 +377,69 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule PrLifecycle do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @modes ["linear", "daemon"]
+    @default_cooldown_minutes 10
+    @default_stale_days 7
+
+    embedded_schema do
+      field(:mode, :string, default: "linear")
+      field(:cooldown_minutes, :integer)
+      field(:stale_days, :integer)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(daemon_attrs(attrs), [:mode, :cooldown_minutes, :stale_days], empty_values: [])
+      |> put_daemon_defaults()
+      |> validate_required([:mode])
+      |> validate_inclusion(:mode, @modes)
+      |> validate_daemon_options()
+    end
+
+    defp daemon_attrs(attrs) when is_map(attrs) do
+      case attrs |> Map.get("mode", Map.get(attrs, :mode, "linear")) |> to_string() do
+        "daemon" -> attrs
+        _mode -> Map.drop(attrs, ["cooldown_minutes", :cooldown_minutes, "stale_days", :stale_days])
+      end
+    end
+
+    defp put_daemon_defaults(changeset) do
+      if get_field(changeset, :mode) == "daemon" do
+        changeset
+        |> put_default(:cooldown_minutes, @default_cooldown_minutes)
+        |> put_default(:stale_days, @default_stale_days)
+      else
+        changeset
+      end
+    end
+
+    defp put_default(changeset, field, default) do
+      if is_nil(get_field(changeset, field)) do
+        put_change(changeset, field, default)
+      else
+        changeset
+      end
+    end
+
+    defp validate_daemon_options(changeset) do
+      if get_field(changeset, :mode) == "daemon" do
+        changeset
+        |> validate_required([:cooldown_minutes, :stale_days])
+        |> validate_number(:cooldown_minutes, greater_than: 0)
+        |> validate_number(:stale_days, greater_than: 0)
+      else
+        changeset
+      end
+    end
+  end
+
   defmodule Server do
     @moduledoc false
     use Ecto.Schema
@@ -406,6 +469,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_many(:routing, Routing, on_replace: :delete)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:pr_lifecycle, PrLifecycle, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
@@ -576,6 +640,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:routing, with: &Routing.changeset/2)
     |> validate_unique_routing_labels()
     |> cast_embed(:observability, with: &Observability.changeset/2)
+    |> cast_embed(:pr_lifecycle, with: &PrLifecycle.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 

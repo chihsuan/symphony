@@ -17,6 +17,9 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.pr_lifecycle.mode == "linear"
+    assert config.pr_lifecycle.cooldown_minutes == nil
+    assert config.pr_lifecycle.stale_days == nil
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -86,6 +89,52 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pr_lifecycle_mode: "daemon",
+      pr_lifecycle_cooldown_minutes: 15,
+      pr_lifecycle_stale_days: 3
+    )
+
+    config = Config.settings!()
+    assert config.pr_lifecycle.mode == "daemon"
+    assert config.pr_lifecycle.cooldown_minutes == 15
+    assert config.pr_lifecycle.stale_days == 3
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pr_lifecycle_mode: "daemon"
+    )
+
+    config = Config.settings!()
+    assert config.pr_lifecycle.mode == "daemon"
+    assert config.pr_lifecycle.cooldown_minutes == 10
+    assert config.pr_lifecycle.stale_days == 7
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      pr_lifecycle_mode: "linear",
+      pr_lifecycle_cooldown_minutes: "invalid",
+      pr_lifecycle_stale_days: -1
+    )
+
+    config = Config.settings!()
+    assert config.pr_lifecycle.mode == "linear"
+    assert config.pr_lifecycle.cooldown_minutes == nil
+    assert config.pr_lifecycle.stale_days == nil
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pr_lifecycle_mode: "daemon",
+      pr_lifecycle_cooldown_minutes: 0
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "pr_lifecycle.cooldown_minutes"
+
+    write_workflow_file!(Workflow.workflow_file_path(), pr_lifecycle_mode: "invalid")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "pr_lifecycle.mode"
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -256,6 +305,23 @@ defmodule SymphonyElixir.CoreTest do
       })
 
     assert SymphonyElixir.Orchestrator in test_children
+  end
+
+  test "application starts PR lifecycle manager only in daemon mode" do
+    write_workflow_file!(Workflow.workflow_file_path(), pr_lifecycle_mode: "linear")
+    linear_children = SymphonyElixir.Application.child_specs_for_runtime(%{})
+
+    refute SymphonyElixir.PrLifecycleManager in linear_children
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pr_lifecycle_mode: "daemon"
+    )
+
+    daemon_children = SymphonyElixir.Application.child_specs_for_runtime(%{})
+
+    assert SymphonyElixir.Orchestrator in daemon_children
+    assert SymphonyElixir.PrLifecycleManager in daemon_children
   end
 
   test "linear issue state reconciliation fetch with no running issues is a no-op" do
@@ -854,6 +920,28 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-697"
     assert prompt =~ "created=2026-02-26T18:06:48Z"
     assert prompt =~ "updated=2026-02-26T18:07:03Z"
+  end
+
+  test "prompt builder appends optional extra prompt context" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Ticket {{ issue.identifier }}")
+
+    issue = %Issue{
+      identifier: "MT-702",
+      title: "Append daemon context",
+      description: "Prompt builder should append injected context",
+      state: "In Review",
+      url: "https://example.org/issues/MT-702",
+      labels: []
+    }
+
+    assert PromptBuilder.build_prompt(issue, extra_prompt: "Review comments") ==
+             "Ticket MT-702\n\nReview comments"
+
+    assert PromptBuilder.build_prompt(issue, prompt_context: "Merge guidance") ==
+             "Ticket MT-702\n\nMerge guidance"
+
+    assert PromptBuilder.build_prompt(issue, extra_prompt: "  \n") == "Ticket MT-702"
+    assert PromptBuilder.build_prompt(issue, extra_prompt: nil) == "Ticket MT-702"
   end
 
   test "prompt builder normalizes nested date-like values, maps, and structs in issue fields" do

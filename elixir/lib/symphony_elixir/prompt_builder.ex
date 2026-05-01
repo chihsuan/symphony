@@ -23,6 +23,7 @@ defmodule SymphonyElixir.PromptBuilder do
       @render_opts
     )
     |> IO.iodata_to_binary()
+    |> append_extra_prompt(Keyword.get(opts, :extra_prompt) || Keyword.get(opts, :prompt_context))
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
@@ -61,4 +62,13 @@ defmodule SymphonyElixir.PromptBuilder do
       prompt
     end
   end
+
+  defp append_extra_prompt(prompt, extra_prompt) when is_binary(extra_prompt) do
+    case String.trim(extra_prompt) do
+      "" -> prompt
+      trimmed -> prompt <> "\n\n" <> trimmed
+    end
+  end
+
+  defp append_extra_prompt(prompt, _extra_prompt), do: prompt
 end

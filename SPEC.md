@@ -358,6 +358,7 @@ Top-level keys:
 - `routing`
 - `agent`
 - `codex`
+- `pr_lifecycle`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -416,6 +417,21 @@ Fields:
   - Default: `true`.
   - When `strategy == worktree`, fetches `origin` in the primary clone before preparing an issue
     workspace.
+
+#### 5.3.3a `pr_lifecycle` (object)
+
+Fields:
+
+- `mode` (`linear` or `daemon`)
+  - Default: `linear`.
+  - `linear` preserves the existing tracker-state-driven review loop.
+  - `daemon` starts a PR lifecycle manager alongside the orchestrator.
+- `cooldown_minutes` (integer)
+  - Daemon-mode default: `10`.
+  - Applies only in `daemon` mode before moving an issue back to an active state for requested changes.
+- `stale_days` (integer)
+  - Daemon-mode default: `7`.
+  - Applies only in `daemon` mode before reclaiming idle tracked PR workspaces.
 
 #### 5.3.4 `hooks` (object)
 
@@ -794,6 +810,28 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
+
+### 7.5 PR Lifecycle Manager
+
+When `pr_lifecycle.mode == "linear"`, Symphony uses only the tracker-state loop above. When
+`pr_lifecycle.mode == "daemon"`, the application additionally starts a `PrLifecycleManager`
+GenServer.
+
+The manager:
+
+- discovers issues in `In Review` with attached GitHub PR URLs;
+- records each PR URL, issue id, and workspace path in the durable run store;
+- polls GitHub for review decisions and PR closure;
+- waits `pr_lifecycle.cooldown_minutes` after requested-change activity before moving the issue
+  back to `In Progress` for orchestrator-owned rework handling;
+- moves the issue back to `In Progress` when GitHub reports approval so the orchestrator starts
+  the merge/landing workflow through the normal run path;
+- removes tracked workspaces and durable lifecycle records when PRs close or remain idle beyond
+  `pr_lifecycle.stale_days`.
+
+The orchestrator continues to own active-state dispatch, retry, run-store run records, and
+dashboard-visible agent execution. The PR lifecycle manager owns only daemon-mode GitHub polling,
+state transitions, and tracked PR cleanup.
 
 ## 8. Polling, Scheduling, and Reconciliation
 

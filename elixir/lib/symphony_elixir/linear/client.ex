@@ -527,6 +527,7 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       pull_request_url: extract_pull_request_url(issue),
       assignee_id: assignee_field(assignee, "id"),
+      pr_urls: extract_pr_urls(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -615,6 +616,19 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_pr_urls(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    attachments
+    |> Enum.flat_map(fn attachment ->
+      case pull_request_attachment_url(attachment) do
+        nil -> []
+        url -> [url]
+      end
+    end)
+    |> Enum.uniq()
+  end
+
+  defp extract_pr_urls(_issue), do: []
 
   defp extract_pull_request_url(%{"attachments" => %{"nodes" => attachments}})
        when is_list(attachments) do
