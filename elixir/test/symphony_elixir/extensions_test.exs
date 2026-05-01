@@ -349,6 +349,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
                  "state" => "In Progress",
+                 "url" => "https://linear.app/example/issue/MT-HTTP",
                  "worker_host" => nil,
                  "workspace_path" => nil,
                  "session_id" => "thread-http",
@@ -366,7 +367,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-watch",
                  "issue_identifier" => "MT-WATCH",
                  "state" => "In Review",
-                 "url" => "https://linear.app/a8c/issue/MT-WATCH",
+                 "url" => "https://linear.app/example/issue/MT-WATCH",
+                 "pull_request_url" => "https://github.com/example/repo/pull/123",
                  "last_ran_at" => state_payload["watching"] |> List.first() |> Map.fetch!("last_ran_at"),
                  "seconds_since_last_run" => 3_600
                }
@@ -462,7 +464,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              "retry" => nil,
              "watching" => %{
                "state" => "In Review",
-               "url" => "https://linear.app/a8c/issue/MT-WATCH",
+               "url" => "https://linear.app/example/issue/MT-WATCH",
+               "pull_request_url" => "https://github.com/example/repo/pull/123",
                "last_ran_at" => state_payload["watching"] |> List.first() |> Map.fetch!("last_ran_at"),
                "seconds_since_last_run" => 3_600
              },
@@ -600,7 +603,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "MT-HTTP"
     assert html =~ "MT-WATCH"
     assert html =~ "MT-RETRY"
-    assert html =~ "https://linear.app/a8c/issue/MT-WATCH"
+    assert html =~ "https://linear.app/example/issue/MT-WATCH"
+    assert html =~ "https://linear.app/example/issue/MT-HTTP"
+    assert html =~ "https://github.com/example/repo/pull/123"
+    assert html =~ ~s(href="https://linear.app/example/issue/MT-HTTP" target="_blank")
+    assert html =~ ~s(href="https://linear.app/example/issue/MT-WATCH" target="_blank")
+    assert html =~ ~s(href="https://github.com/example/repo/pull/123" target="_blank")
+    refute html =~ "Linear ↗"
     assert html =~ "rendered"
     assert html =~ "Runtime"
     assert html =~ "Live"
@@ -654,6 +663,37 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_eventually(fn ->
       render(view) =~ "agent message content streaming: structured update"
     end)
+  end
+
+  test "dashboard liveview omits watching PR link when pull request URL is unavailable" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardNoPrOrchestrator)
+
+    snapshot =
+      update_in(static_snapshot().watching, fn [watching] ->
+        [
+          Map.put(watching, :pull_request_url, ""),
+          %{watching | issue_id: "issue-watch-nil", identifier: "MT-WATCH-NIL", pull_request_url: nil},
+          watching
+          |> Map.merge(%{issue_id: "issue-watch-missing", identifier: "MT-WATCH-MISSING"})
+          |> Map.delete(:pull_request_url)
+        ]
+      end)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "MT-WATCH"
+    assert html =~ "MT-WATCH-NIL"
+    assert html =~ "MT-WATCH-MISSING"
+    refute html =~ ">PR</a>"
+    refute html =~ ~s(href="" target="_blank")
   end
 
   test "dashboard liveview tolerates snapshots with partial codex totals" do
@@ -877,6 +917,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_id: "issue-http",
           identifier: "MT-HTTP",
           state: "In Progress",
+          url: "https://linear.app/example/issue/MT-HTTP",
           session_id: "thread-http",
           turn_count: 7,
           codex_app_server_pid: nil,
@@ -894,7 +935,8 @@ defmodule SymphonyElixir.ExtensionsTest do
           issue_id: "issue-watch",
           identifier: "MT-WATCH",
           state: "In Review",
-          url: "https://linear.app/a8c/issue/MT-WATCH",
+          url: "https://linear.app/example/issue/MT-WATCH",
+          pull_request_url: "https://github.com/example/repo/pull/123",
           last_ran_at: DateTime.add(DateTime.utc_now(), -3_600, :second),
           seconds_since_last_run: 3_600
         }

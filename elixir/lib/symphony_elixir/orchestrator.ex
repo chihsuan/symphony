@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, RunStore, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, RunStore, StatusDashboard, Tracker, URLUtils, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -1312,6 +1312,7 @@ defmodule SymphonyElixir.Orchestrator do
           metadata = %{
             identifier: Map.get(most_recent, :issue_identifier),
             url: nil,
+            pull_request_url: URLUtils.pull_request_url(most_recent),
             last_ran_at: Map.get(most_recent, :ended_at) || Map.get(most_recent, :started_at)
           }
 
@@ -1462,6 +1463,7 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: 0,
       last_event: Map.get(running_entry, :last_codex_event),
       last_event_at: Map.get(running_entry, :last_codex_timestamp),
+      pull_request_url: URLUtils.pull_request_url(running_entry),
       updated_at: now
     }
   end
@@ -1478,6 +1480,7 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: running_seconds(Map.get(running_entry, :started_at), DateTime.utc_now()),
       last_event: Map.get(running_entry, :last_codex_event),
       last_event_at: Map.get(running_entry, :last_codex_timestamp),
+      pull_request_url: URLUtils.pull_request_url(running_entry),
       updated_at: DateTime.utc_now()
     }
   end
@@ -1559,6 +1562,7 @@ defmodule SymphonyElixir.Orchestrator do
           issue_id: issue_id,
           identifier: metadata.identifier,
           state: metadata.issue.state,
+          url: issue_url(metadata.issue),
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: Map.get(metadata, :session_id),
@@ -1601,7 +1605,8 @@ defmodule SymphonyElixir.Orchestrator do
           issue_id: issue_id,
           identifier: Map.get(watching_entry, :identifier),
           state: Map.get(watching_entry, :state),
-          url: Map.get(watching_entry, :url),
+          url: URLUtils.present_url(Map.get(watching_entry, :url)),
+          pull_request_url: URLUtils.pull_request_url(watching_entry),
           last_ran_at: last_ran_at,
           seconds_since_last_run: seconds_since(last_ran_at, now)
         }
@@ -1834,12 +1839,13 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       identifier: Map.get(running_entry, :identifier) || issue_identifier(issue),
       url: issue_url(issue),
+      pull_request_url: URLUtils.pull_request_url(running_entry),
       last_ran_at: DateTime.utc_now()
     }
   end
 
   defp completed_run_metadata(_running_entry) do
-    %{identifier: nil, url: nil, last_ran_at: DateTime.utc_now()}
+    %{identifier: nil, url: nil, pull_request_url: nil, last_ran_at: DateTime.utc_now()}
   end
 
   defp put_watching_issue(%State{} = state, %Issue{id: issue_id} = issue) when is_binary(issue_id) do
@@ -1853,7 +1859,11 @@ defmodule SymphonyElixir.Orchestrator do
           Map.get(existing, :identifier) ||
           issue_id,
       state: issue.state,
-      url: issue.url || Map.get(completed_metadata, :url) || Map.get(existing, :url),
+      url:
+        issue_url(issue) ||
+          URLUtils.present_url(Map.get(completed_metadata, :url)) ||
+          URLUtils.present_url(Map.get(existing, :url)),
+      pull_request_url: URLUtils.pull_request_url(completed_metadata) || URLUtils.pull_request_url(existing),
       last_ran_at:
         Map.get(completed_metadata, :last_ran_at) ||
           Map.get(existing, :last_ran_at) ||
@@ -1879,7 +1889,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_identifier(%Issue{identifier: identifier}), do: identifier
   defp issue_identifier(_issue), do: nil
 
-  defp issue_url(%Issue{url: url}), do: url
+  defp issue_url(%Issue{url: url}), do: URLUtils.present_url(url)
   defp issue_url(_issue), do: nil
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do

@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard, URLUtils}
 
   @empty_codex_totals %{
     input_tokens: 0,
@@ -152,6 +152,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       state: entry.state,
+      url: URLUtils.present_url(Map.get(entry, :url)),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
@@ -174,7 +175,8 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       state: entry.state,
-      url: entry.url,
+      url: URLUtils.present_url(Map.get(entry, :url)),
+      pull_request_url: URLUtils.pull_request_url(entry),
       last_ran_at: iso8601(entry.last_ran_at),
       seconds_since_last_run: entry.seconds_since_last_run
     }
@@ -225,7 +227,8 @@ defmodule SymphonyElixirWeb.Presenter do
   defp watching_issue_payload(watching) do
     %{
       state: watching.state,
-      url: watching.url,
+      url: URLUtils.present_url(watching.url),
+      pull_request_url: URLUtils.pull_request_url(watching),
       last_ran_at: iso8601(watching.last_ran_at),
       seconds_since_last_run: watching.seconds_since_last_run
     }

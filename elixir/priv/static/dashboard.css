@@ -411,6 +411,16 @@ pre,
   letter-spacing: -0.01em;
 }
 
+.issue-id[href] {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.issue-id[href]:hover {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
+
 .issue-actions {
   display: flex;
   flex-wrap: wrap;
