@@ -164,6 +164,21 @@ defmodule SymphonyElixir.AppServerTest do
         trace = File.read!(trace_file)
         lines = String.split(trace, "\n", trim: true)
 
+        {:ok, canonical_workspace} =
+          SymphonyElixir.PathSafety.canonicalize(Path.expand(workspace))
+
+        {:ok, canonical_workspace_git} =
+          SymphonyElixir.PathSafety.canonicalize(Path.join(workspace, ".git"))
+
+        expected_policy =
+          case configured_policy do
+            %{"type" => "workspaceWrite"} ->
+              Map.put(configured_policy, "writableRoots", [canonical_workspace, canonical_workspace_git, "relative/path"])
+
+            _ ->
+              configured_policy
+          end
+
         assert Enum.any?(lines, fn line ->
                  if String.starts_with?(line, "JSON:") do
                    line
@@ -171,7 +186,7 @@ defmodule SymphonyElixir.AppServerTest do
                    |> Jason.decode!()
                    |> then(fn payload ->
                      payload["method"] == "turn/start" &&
-                       get_in(payload, ["params", "sandboxPolicy"]) == configured_policy
+                       get_in(payload, ["params", "sandboxPolicy"]) == expected_policy
                    end)
                  else
                    false
@@ -1368,7 +1383,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [remote_workspace],
+        "writableRoots" => [remote_workspace, "#{remote_workspace}/.git"],
         "readOnlyAccess" => %{"type" => "fullAccess"},
         "networkAccess" => false,
         "excludeTmpdirEnvVar" => false,

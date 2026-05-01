@@ -1245,9 +1245,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.approval_policy == "on-request"
     assert config.codex.thread_sandbox == "workspace-write"
 
+    assert {:ok, canonical_explicit_workspace} =
+             SymphonyElixir.PathSafety.canonicalize(explicit_workspace)
+
+    assert {:ok, canonical_explicit_workspace_git} =
+             SymphonyElixir.PathSafety.canonicalize(Path.join(explicit_workspace, ".git"))
+
+    assert {:ok, canonical_explicit_cache} =
+             SymphonyElixir.PathSafety.canonicalize(explicit_cache)
+
     assert Config.codex_turn_sandbox_policy(explicit_workspace) == %{
              "type" => "workspaceWrite",
-             "writableRoots" => [explicit_workspace, explicit_cache]
+             "writableRoots" => [
+               canonical_explicit_workspace,
+               canonical_explicit_workspace_git,
+               canonical_explicit_cache
+             ]
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
@@ -1628,7 +1641,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
-  test "runtime sandbox policy resolution passes explicit policies through unchanged" do
+  test "runtime sandbox policy resolution keeps clone workspace writable with explicit roots" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1651,9 +1664,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
 
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace_git} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(issue_workspace, ".git"))
+
       assert runtime_settings.turn_sandbox_policy == %{
                "type" => "workspaceWrite",
-               "writableRoots" => ["relative/path"],
+               "writableRoots" => [canonical_issue_workspace, canonical_issue_workspace_git, "relative/path"],
                "networkAccess" => true
              }
 
@@ -1671,6 +1690,181 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "type" => "futureSandbox",
                "nested" => %{"flag" => true}
              }
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime sandbox policy resolution adds worktree git metadata root" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-worktree-sandbox-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-101")
+      repo = Path.join(test_root, "repo")
+      repo_git = Path.join(repo, ".git")
+
+      File.mkdir_p!(issue_workspace)
+      File.mkdir_p!(repo_git)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: repo,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          writableRoots: ["relative/path"],
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, canonical_issue_workspace_git} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(issue_workspace, ".git"))
+
+      assert {:ok, canonical_repo_git} = SymphonyElixir.PathSafety.canonicalize(repo_git)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [
+                 canonical_issue_workspace,
+                 canonical_issue_workspace_git,
+                 canonical_repo_git,
+                 "relative/path"
+               ],
+               "networkAccess" => true
+             }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: repo,
+        codex_turn_sandbox_policy: nil
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [canonical_issue_workspace, canonical_issue_workspace_git, canonical_repo_git],
+               "readOnlyAccess" => %{"type" => "fullAccess"},
+               "networkAccess" => false,
+               "excludeTmpdirEnvVar" => false,
+               "excludeSlashTmp" => false
+             }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        workspace_strategy: "worktree",
+        workspace_repo: repo,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          networkAccess: true
+        }
+      )
+
+      assert {:ok, runtime_settings} = Config.codex_runtime_settings(issue_workspace)
+
+      assert runtime_settings.turn_sandbox_policy == %{
+               "type" => "workspaceWrite",
+               "writableRoots" => [canonical_issue_workspace, canonical_issue_workspace_git, canonical_repo_git],
+               "readOnlyAccess" => %{"type" => "fullAccess"},
+               "networkAccess" => true,
+               "excludeTmpdirEnvVar" => false,
+               "excludeSlashTmp" => false
+             }
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime sandbox policy resolution filters non-string writableRoots entries" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-nonstring-roots-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-NS")
+      File.mkdir_p!(issue_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      settings = Config.settings!()
+
+      policy_settings = %{
+        settings
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{
+                "type" => "workspaceWrite",
+                "writableRoots" => ["relative/path", 8080, %{"nested" => true}]
+              }
+          }
+      }
+
+      assert {:ok, canonical_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(issue_workspace)
+
+      assert {:ok, canonical_workspace_git} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(issue_workspace, ".git"))
+
+      assert {:ok, policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(policy_settings, issue_workspace)
+
+      assert policy["writableRoots"] == [canonical_workspace, canonical_workspace_git, "relative/path"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "runtime sandbox policy resolution keeps explicit absolute roots raw in remote mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-remote-roots-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      settings = Config.settings!()
+
+      policy_settings = %{
+        settings
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{
+                "type" => "workspaceWrite",
+                "writableRoots" => ["/remote/absolute/path", "relative/path"]
+              }
+          }
+      }
+
+      assert {:ok, policy} =
+               Schema.resolve_runtime_turn_sandbox_policy(
+                 policy_settings,
+                 "/remote/workspace",
+                 remote: true
+               )
+
+      assert policy["writableRoots"] == [
+               "/remote/workspace",
+               "/remote/workspace/.git",
+               "/remote/absolute/path",
+               "relative/path"
+             ]
     after
       File.rm_rf(test_root)
     end
@@ -1938,6 +2132,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       {_output, 0} = System.cmd("git", ["init", "--bare", origin_repo])
       git!(primary_repo, ["remote", "add", "origin", origin_repo])
       git!(primary_repo, ["push", "-u", "origin", "main"])
+      {_output, 0} = System.cmd("git", ["-C", origin_repo, "symbolic-ref", "HEAD", "refs/heads/main"])
       git!(primary_repo, ["fetch", "origin"])
     end
 

@@ -1553,6 +1553,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, _result} = AppServer.run(workspace, "Fix workspace start args", issue)
       assert {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
+      assert {:ok, canonical_workspace_git} = SymphonyElixir.PathSafety.canonicalize(Path.join(workspace, ".git"))
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -1589,7 +1590,7 @@ defmodule SymphonyElixir.CoreTest do
 
       expected_turn_sandbox_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [canonical_workspace],
+        "writableRoots" => [canonical_workspace, canonical_workspace_git],
         "readOnlyAccess" => %{"type" => "fullAccess"},
         "networkAccess" => false,
         "excludeTmpdirEnvVar" => false,
@@ -1776,7 +1777,7 @@ defmodule SymphonyElixir.CoreTest do
         codex_thread_sandbox: "workspace-write",
         codex_turn_sandbox_policy: %{
           type: "workspaceWrite",
-          writableRoots: [Path.expand(workspace), workspace_cache]
+          writableRoots: [workspace_cache]
         }
       )
 
@@ -1809,9 +1810,18 @@ defmodule SymphonyElixir.CoreTest do
                end
              end)
 
+      assert {:ok, canonical_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(Path.expand(workspace))
+
+      assert {:ok, canonical_workspace_git} =
+               SymphonyElixir.PathSafety.canonicalize(Path.join(workspace, ".git"))
+
+      assert {:ok, canonical_workspace_cache} =
+               SymphonyElixir.PathSafety.canonicalize(workspace_cache)
+
       expected_turn_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [Path.expand(workspace), workspace_cache]
+        "writableRoots" => [canonical_workspace, canonical_workspace_git, canonical_workspace_cache]
       }
 
       assert Enum.any?(lines, fn line ->
