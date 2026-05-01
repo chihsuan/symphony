@@ -134,8 +134,8 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           observability_transcript_buffer_size: 200,
           pr_lifecycle_mode: "linear",
-          pr_lifecycle_cooldown_minutes: 30,
-          pr_lifecycle_stale_days: 7,
+          pr_lifecycle_cooldown_minutes: nil,
+          pr_lifecycle_stale_days: nil,
           server_port: nil,
           server_host: nil,
           prompt: @workflow_prompt
@@ -313,9 +313,10 @@ defmodule SymphonyElixir.TestSupport do
     [
       "pr_lifecycle:",
       "  mode: #{yaml_value(mode)}",
-      "  cooldown_minutes: #{yaml_value(cooldown_minutes)}",
-      "  stale_days: #{yaml_value(stale_days)}"
+      !is_nil(cooldown_minutes) && "  cooldown_minutes: #{yaml_value(cooldown_minutes)}",
+      !is_nil(stale_days) && "  stale_days: #{yaml_value(stale_days)}"
     ]
+    |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")
   end
 

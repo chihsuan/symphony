@@ -18,8 +18,8 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
     assert config.pr_lifecycle.mode == "linear"
-    assert config.pr_lifecycle.cooldown_minutes == 30
-    assert config.pr_lifecycle.stale_days == 7
+    assert config.pr_lifecycle.cooldown_minutes == nil
+    assert config.pr_lifecycle.stale_days == nil
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -101,6 +101,36 @@ defmodule SymphonyElixir.CoreTest do
     assert config.pr_lifecycle.mode == "daemon"
     assert config.pr_lifecycle.cooldown_minutes == 15
     assert config.pr_lifecycle.stale_days == 3
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pr_lifecycle_mode: "daemon"
+    )
+
+    config = Config.settings!()
+    assert config.pr_lifecycle.mode == "daemon"
+    assert config.pr_lifecycle.cooldown_minutes == 10
+    assert config.pr_lifecycle.stale_days == 7
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      pr_lifecycle_mode: "linear",
+      pr_lifecycle_cooldown_minutes: "invalid",
+      pr_lifecycle_stale_days: -1
+    )
+
+    config = Config.settings!()
+    assert config.pr_lifecycle.mode == "linear"
+    assert config.pr_lifecycle.cooldown_minutes == nil
+    assert config.pr_lifecycle.stale_days == nil
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      pr_lifecycle_mode: "daemon",
+      pr_lifecycle_cooldown_minutes: 0
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "pr_lifecycle.cooldown_minutes"
 
     write_workflow_file!(Workflow.workflow_file_path(), pr_lifecycle_mode: "invalid")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()

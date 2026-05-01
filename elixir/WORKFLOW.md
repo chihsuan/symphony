@@ -18,8 +18,6 @@ polling:
   interval_ms: 5000
 pr_lifecycle:
   mode: linear
-  cooldown_minutes: 30
-  stale_days: 7
 observability:
   transcript_buffer_size: 200
 workspace:

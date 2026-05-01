@@ -14,6 +14,8 @@ defmodule SymphonyElixir.PrLifecycleManager do
   @changes_requested "CHANGES_REQUESTED"
   @approved "APPROVED"
   @closed_pr_states ["CLOSED", "MERGED"]
+  @github_error_backoff_threshold 3
+  @max_github_error_backoff_ms 300_000
 
   defmodule State do
     @moduledoc false
@@ -64,8 +66,6 @@ defmodule SymphonyElixir.PrLifecycleManager do
       _mode ->
         {:ok, %{mode: :linear, discovered: 0, processed: 0, actions: []}}
     end
-  rescue
-    error -> {:error, {error.__struct__, Exception.message(error)}}
   end
 
   defp do_poll_once(settings, opts) do
@@ -107,8 +107,15 @@ defmodule SymphonyElixir.PrLifecycleManager do
         false
 
       record ->
-        :ok = persist_pr_lifecycle(run_store, record)
-        true
+        case persist_pr_lifecycle(run_store, record) do
+          :ok ->
+            true
+
+          {:error, reason} ->
+            Logger.warning("Failed to persist discovered PR lifecycle record issue_id=#{issue.id}: #{inspect(reason)}")
+
+            false
+        end
     end
   end
 
@@ -137,6 +144,16 @@ defmodule SymphonyElixir.PrLifecycleManager do
   defp discover_lifecycle_record(_issue, _runs, _existing, _now), do: nil
 
   defp process_lifecycle(record, issue, settings, opts, now) when is_map(record) do
+    case backoff_active_until(record, now) do
+      {:backing_off, next_poll_at} ->
+        {:backing_off, Map.get(record, :issue_id), next_poll_at}
+
+      :ready ->
+        fetch_and_process_lifecycle(record, issue, settings, opts, now)
+    end
+  end
+
+  defp fetch_and_process_lifecycle(record, issue, settings, opts, now) do
     github = Keyword.get(opts, :github, PullRequest)
 
     case github.fetch_activity(Map.get(record, :pr_url), cwd: Map.get(record, :workspace_path)) do
@@ -144,13 +161,19 @@ defmodule SymphonyElixir.PrLifecycleManager do
         handle_activity(record, issue_for_record(issue, record), activity, settings, opts, now)
 
       {:error, reason} ->
-        update_lifecycle(opts, record, %{
-          status: "poll_error",
-          error: inspect(reason),
-          updated_at: now
-        })
+        record_poll_error(record, reason, opts, now)
+    end
+  end
 
+  defp record_poll_error(record, reason, opts, now) do
+    attrs = poll_error_attrs(record, reason, opts, now)
+
+    case update_lifecycle(opts, record, attrs) do
+      :ok ->
         {:poll_error, Map.get(record, :issue_id), reason}
+
+      {:error, update_reason} ->
+        {:poll_error_update_failed, Map.get(record, :issue_id), reason, update_reason}
     end
   end
 
@@ -171,8 +194,7 @@ defmodule SymphonyElixir.PrLifecycleManager do
         maybe_spawn_merge(record, issue, activity, attrs, opts, now)
 
       :watching ->
-        update_lifecycle(opts, record, attrs)
-        {:watching, Map.get(record, :issue_id)}
+        complete_lifecycle_update(opts, record, attrs, {:watching, Map.get(record, :issue_id)})
     end
   end
 
@@ -191,6 +213,8 @@ defmodule SymphonyElixir.PrLifecycleManager do
     attrs = %{
       status: "watching",
       error: nil,
+      consecutive_errors: 0,
+      next_poll_at: nil,
       last_activity_at: latest_activity_at,
       last_review_activity_at: latest_review_activity_at,
       last_review_decision: Map.get(activity, :review_decision),
@@ -217,17 +241,15 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
     cond do
       handled_activity?(record, latest_activity_at) ->
-        update_lifecycle(opts, record, attrs)
-        {:already_handled, Map.get(record, :issue_id), :rework}
+        complete_lifecycle_update(opts, record, attrs, {:already_handled, Map.get(record, :issue_id), :rework})
 
       !cooldown_elapsed?(latest_activity_at, now, settings.pr_lifecycle.cooldown_minutes) ->
-        update_lifecycle(opts, record, Map.merge(attrs, %{status: "cooling_down"}))
-        {:cooling_down, Map.get(record, :issue_id)}
+        complete_lifecycle_update(opts, record, Map.merge(attrs, %{status: "cooling_down"}), {:cooling_down, Map.get(record, :issue_id)})
 
       true ->
         prompt = rework_prompt(record, activity, settings)
 
-        finish_spawn_action(spawn_agent(issue, record, prompt, opts), record, attrs, opts, now, "rework")
+        finish_spawn_action(fn -> spawn_agent(issue, record, prompt, opts) end, record, attrs, opts, now, "rework")
     end
   end
 
@@ -235,12 +257,11 @@ defmodule SymphonyElixir.PrLifecycleManager do
     latest_activity_at = action_activity_at(attrs)
 
     if handled_activity?(record, latest_activity_at) do
-      update_lifecycle(opts, record, attrs)
-      {:already_handled, Map.get(record, :issue_id), :merge}
+      complete_lifecycle_update(opts, record, attrs, {:already_handled, Map.get(record, :issue_id), :merge})
     else
       prompt = merge_prompt(record, activity)
 
-      finish_spawn_action(spawn_agent(issue, record, prompt, opts), record, attrs, opts, now, "merge")
+      finish_spawn_action(fn -> spawn_agent(issue, record, prompt, opts) end, record, attrs, opts, now, "merge")
     end
   end
 
@@ -248,33 +269,66 @@ defmodule SymphonyElixir.PrLifecycleManager do
     Map.get(attrs, :last_review_activity_at) || Map.fetch!(attrs, :last_activity_at)
   end
 
-  defp finish_spawn_action(:ok, record, attrs, opts, now, action) do
-    update_lifecycle(
-      opts,
-      record,
-      Map.merge(attrs, %{
-        status: "#{action}_spawned",
-        last_action: action,
-        last_action_at: now
-      })
-    )
+  defp finish_spawn_action(spawn_fun, record, attrs, opts, now, action) when is_function(spawn_fun, 0) do
+    case reserve_spawn_action(record, attrs, opts, now, action) do
+      :ok ->
+        complete_spawn_action(spawn_fun.(), record, attrs, opts, now, action)
 
-    {:spawned, Map.get(record, :issue_id), String.to_existing_atom(action)}
+      {:error, reason} ->
+        {:spawn_reservation_error, Map.get(record, :issue_id), action_atom(action), reason}
+    end
   end
 
-  defp finish_spawn_action({:error, reason}, record, attrs, opts, now, action) do
+  defp reserve_spawn_action(record, attrs, opts, now, action) do
     update_lifecycle(
       opts,
       record,
       Map.merge(attrs, %{
-        status: "spawn_error",
-        error: inspect(reason),
+        status: "#{action}_spawning",
+        error: nil,
         last_action: action,
+        last_action_at: now,
         updated_at: now
       })
     )
+  end
 
-    {:spawn_error, Map.get(record, :issue_id), String.to_existing_atom(action), reason}
+  defp complete_spawn_action(:ok, record, attrs, opts, now, action) do
+    case update_lifecycle(
+           opts,
+           record,
+           Map.merge(attrs, %{
+             status: "#{action}_spawned",
+             last_action: action,
+             last_action_at: now
+           })
+         ) do
+      :ok ->
+        {:spawned, Map.get(record, :issue_id), action_atom(action)}
+
+      {:error, reason} ->
+        {:spawn_update_error, Map.get(record, :issue_id), action_atom(action), reason}
+    end
+  end
+
+  defp complete_spawn_action({:error, reason}, record, attrs, opts, now, action) do
+    case update_lifecycle(
+           opts,
+           record,
+           Map.merge(attrs, %{
+             status: "spawn_error",
+             error: inspect(reason),
+             last_action: action,
+             last_action_at: nil,
+             updated_at: now
+           })
+         ) do
+      :ok ->
+        {:spawn_error, Map.get(record, :issue_id), action_atom(action), reason}
+
+      {:error, update_reason} ->
+        {:spawn_error_update_failed, Map.get(record, :issue_id), action_atom(action), reason, update_reason}
+    end
   end
 
   defp cleanup_lifecycle(record, opts, now, reason) do
@@ -283,26 +337,39 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
     case workspace.remove(Map.get(record, :workspace_path), Map.get(record, :worker_host)) do
       {:ok, _removed_paths} ->
-        :ok = run_store.delete_pr_lifecycle(Map.get(record, :issue_id))
-        {:cleanup, Map.get(record, :issue_id), reason}
+        case run_store.delete_pr_lifecycle(Map.get(record, :issue_id)) do
+          :ok ->
+            {:cleanup, Map.get(record, :issue_id), reason}
+
+          {:error, delete_reason} ->
+            Logger.warning("Failed to delete PR lifecycle record issue_id=#{Map.get(record, :issue_id)} after cleanup: #{inspect(delete_reason)}")
+
+            {:cleanup_error, Map.get(record, :issue_id), delete_reason}
+        end
 
       {:error, cleanup_reason, output} ->
-        update_lifecycle(opts, record, %{
-          status: "cleanup_error",
-          error: inspect({cleanup_reason, output}),
-          updated_at: now
-        })
-
-        {:cleanup_error, Map.get(record, :issue_id), cleanup_reason}
+        complete_lifecycle_update(
+          opts,
+          record,
+          %{
+            status: "cleanup_error",
+            error: inspect({cleanup_reason, output}),
+            updated_at: now
+          },
+          {:cleanup_error, Map.get(record, :issue_id), cleanup_reason}
+        )
 
       other ->
-        update_lifecycle(opts, record, %{
-          status: "cleanup_error",
-          error: inspect(other),
-          updated_at: now
-        })
-
-        {:cleanup_error, Map.get(record, :issue_id), other}
+        complete_lifecycle_update(
+          opts,
+          record,
+          %{
+            status: "cleanup_error",
+            error: inspect(other),
+            updated_at: now
+          },
+          {:cleanup_error, Map.get(record, :issue_id), other}
+        )
     end
   end
 
@@ -474,7 +541,7 @@ defmodule SymphonyElixir.PrLifecycleManager do
   defp persist_pr_lifecycle(run_store, record) do
     case run_store.put_pr_lifecycle(record) do
       :ok -> :ok
-      {:error, reason} -> raise "failed to persist PR lifecycle record: #{inspect(reason)}"
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -487,13 +554,86 @@ defmodule SymphonyElixir.PrLifecycleManager do
         :ok
 
       {:error, :pr_lifecycle_not_found} ->
-        :ok = run_store.put_pr_lifecycle(Map.merge(record, attrs))
+        upsert_lifecycle(run_store, record, attrs)
 
       {:error, reason} ->
-        Logger.warning("Failed to update PR lifecycle record issue_id=#{issue_id}: #{inspect(reason)}")
-        :ok
+        log_lifecycle_store_error("update", issue_id, attrs, reason)
+        {:error, {:update_pr_lifecycle_failed, reason}}
     end
   end
+
+  defp upsert_lifecycle(run_store, record, attrs) do
+    issue_id = Map.get(record, :issue_id)
+
+    case run_store.put_pr_lifecycle(Map.merge(record, attrs)) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        log_lifecycle_store_error("upsert", issue_id, attrs, reason)
+        {:error, {:put_pr_lifecycle_failed, reason}}
+    end
+  end
+
+  defp complete_lifecycle_update(opts, record, attrs, success_action) do
+    case update_lifecycle(opts, record, attrs) do
+      :ok -> success_action
+      {:error, reason} -> {:update_error, Map.get(record, :issue_id), reason}
+    end
+  end
+
+  defp log_lifecycle_store_error(operation, issue_id, attrs, reason) do
+    Logger.warning("Failed to #{operation} PR lifecycle record issue_id=#{issue_id} target_status=#{inspect(Map.get(attrs, :status))}: #{inspect(reason)}")
+  end
+
+  defp backoff_active_until(record, now) do
+    case Map.get(record, :next_poll_at) do
+      %DateTime{} = next_poll_at ->
+        if DateTime.compare(next_poll_at, now) == :gt do
+          {:backing_off, next_poll_at}
+        else
+          :ready
+        end
+
+      _next_poll_at ->
+        :ready
+    end
+  end
+
+  defp poll_error_attrs(record, reason, opts, now) do
+    consecutive_errors = consecutive_errors(record) + 1
+
+    attrs = %{
+      status: "poll_error",
+      error: inspect(reason),
+      consecutive_errors: consecutive_errors,
+      updated_at: now
+    }
+
+    if consecutive_errors >= @github_error_backoff_threshold do
+      Map.put(attrs, :next_poll_at, DateTime.add(now, github_error_backoff_ms(consecutive_errors, opts), :millisecond))
+    else
+      Map.put(attrs, :next_poll_at, nil)
+    end
+  end
+
+  defp consecutive_errors(record) do
+    case Map.get(record, :consecutive_errors) do
+      value when is_integer(value) and value >= 0 -> value
+      _value -> 0
+    end
+  end
+
+  defp github_error_backoff_ms(consecutive_errors, opts) do
+    exponent = max(consecutive_errors - @github_error_backoff_threshold, 0)
+
+    poll_interval_ms(opts)
+    |> Kernel.*(Integer.pow(2, exponent))
+    |> min(@max_github_error_backoff_ms)
+  end
+
+  defp action_atom("rework"), do: :rework
+  defp action_atom("merge"), do: :merge
 
   defp schedule_poll(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
     if is_reference(state.timer_ref) do

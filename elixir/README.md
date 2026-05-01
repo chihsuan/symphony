@@ -96,7 +96,8 @@ preserves the existing human-driven review loop. In `daemon` mode, Symphony star
 `PrLifecycleManager` process that discovers in-review issues with attached GitHub PRs, records their
 PR URL and workspace path in the durable run store, waits `cooldown_minutes` before responding to
 requested changes, spawns a merge run when GitHub reports approval, and removes tracked workspaces
-when PRs close or stay idle beyond `stale_days`.
+when PRs close or stay idle beyond `stale_days`. `cooldown_minutes` and `stale_days` are daemon-only
+settings; daemon mode defaults them to 10 minutes and 7 days when omitted.
 
 Minimal example:
 

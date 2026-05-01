@@ -427,11 +427,11 @@ Fields:
   - `linear` preserves the existing tracker-state-driven review loop.
   - `daemon` starts a PR lifecycle manager alongside the orchestrator.
 - `cooldown_minutes` (integer)
-  - Default: `30`.
-  - Applies in `daemon` mode before spawning a rework agent for requested changes.
+  - Daemon-mode default: `10`.
+  - Applies only in `daemon` mode before spawning a rework agent for requested changes.
 - `stale_days` (integer)
-  - Default: `7`.
-  - Applies in `daemon` mode before reclaiming idle tracked PR workspaces.
+  - Daemon-mode default: `7`.
+  - Applies only in `daemon` mode before reclaiming idle tracked PR workspaces.
 
 #### 5.3.4 `hooks` (object)
 
