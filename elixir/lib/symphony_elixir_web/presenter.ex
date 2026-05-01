@@ -30,6 +30,7 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           run_history: Enum.map(Map.get(snapshot, :run_history, []), &run_history_payload/1),
           codex_totals: normalize_codex_totals(Map.get(snapshot, :codex_totals)),
+          budget: normalize_budget(Map.get(snapshot, :budget)),
           rate_limits: snapshot.rate_limits
         }
 
@@ -258,6 +259,26 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp normalize_codex_totals(_totals), do: @empty_codex_totals
+
+  defp normalize_budget(budget) when is_map(budget) do
+    %{
+      per_issue_limit: Map.get(budget, :per_issue_limit),
+      daily_limit: Map.get(budget, :daily_limit),
+      daily_used: Map.get(budget, :daily_used, 0),
+      daily_remaining: Map.get(budget, :daily_remaining),
+      daily_paused: Map.get(budget, :daily_paused, false)
+    }
+  end
+
+  defp normalize_budget(_budget) do
+    %{
+      per_issue_limit: nil,
+      daily_limit: nil,
+      daily_used: 0,
+      daily_remaining: nil,
+      daily_paused: false
+    }
+  end
 
   defp workspace_payload(issue_identifier, running, retry) do
     if running || retry do

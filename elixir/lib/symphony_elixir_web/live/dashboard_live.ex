@@ -106,6 +106,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Daily budget</p>
+            <p class="metric-value numeric"><%= format_budget_usage(@payload.budget.daily_used, @payload.budget.daily_limit) %></p>
+            <p class="metric-detail"><%= daily_budget_detail(@payload.budget) %></p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Issue budget</p>
+            <p class="metric-value numeric"><%= format_budget_limit(@payload.budget.per_issue_limit) %></p>
+            <p class="metric-detail">Per running issue token limit.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
@@ -176,6 +188,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <button
                             type="button"
                             class="subtle-button session-copy-btn"
+                            aria-label="Copy ID"
                             data-label={String.slice(entry.session_id, 0, 8) <> "…"}
                             data-copy={entry.session_id}
                             title={entry.session_id}
@@ -376,12 +389,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp format_ago(_seconds), do: "n/a"
 
   defp format_event_at(nil, _now), do: nil
+
   defp format_event_at(timestamp, now) when is_binary(timestamp) do
     case seconds_since(timestamp, now) do
       seconds when is_integer(seconds) -> format_ago(seconds)
       _ -> String.slice(timestamp, 11, 8)
     end
   end
+
   defp format_event_at(_timestamp, _now), do: nil
 
   defp format_runtime_seconds(seconds) when is_number(seconds) do
@@ -390,6 +405,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
     secs = rem(whole_seconds, 60)
     "#{mins}m #{secs}s"
   end
+
+  defp format_budget_usage(used, limit) when is_integer(limit) and limit > 0 do
+    "#{format_int(used)} / #{format_int(limit)}"
+  end
+
+  defp format_budget_usage(used, _limit), do: "#{format_int(used)} / unlimited"
+
+  defp format_budget_limit(limit) when is_integer(limit) and limit > 0, do: format_int(limit)
+  defp format_budget_limit(_limit), do: "Unlimited"
+
+  defp daily_budget_detail(%{daily_paused: true}), do: "Paused; no new dispatch."
+
+  defp daily_budget_detail(%{daily_remaining: remaining}) when is_integer(remaining) do
+    "#{format_int(remaining)} tokens remaining today."
+  end
+
+  defp daily_budget_detail(_budget), do: "No daily limit configured."
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
     DateTime.diff(now, started_at, :second)

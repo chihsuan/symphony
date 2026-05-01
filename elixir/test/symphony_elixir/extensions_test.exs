@@ -409,6 +409,13 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
+             "budget" => %{
+               "per_issue_limit" => 500,
+               "daily_limit" => 1_000,
+               "daily_used" => 400,
+               "daily_remaining" => 600,
+               "daily_paused" => false
+             },
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
 
@@ -930,6 +937,13 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+      budget: %{
+        per_issue_limit: 500,
+        daily_limit: 1_000,
+        daily_used: 400,
+        daily_remaining: 600,
+        daily_paused: false
+      },
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }
   end

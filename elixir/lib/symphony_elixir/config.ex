@@ -139,9 +139,30 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_project_slug}
 
       true ->
-        validate_workspace_semantics(settings)
+        with :ok <- validate_workspace_semantics(settings) do
+          warn_if_budget_token_reporting_unavailable(settings)
+          :ok
+        end
     end
   end
+
+  defp warn_if_budget_token_reporting_unavailable(%Schema{} = settings) do
+    agent = settings.agent
+
+    if is_integer(agent.max_tokens_per_issue) and not codex_app_server_command?(settings.codex.command) do
+      Logger.warning("agent.max_tokens_per_issue is configured but codex.command may not report token usage command=#{inspect(settings.codex.command)}")
+    end
+
+    :ok
+  end
+
+  defp codex_app_server_command?(command) when is_binary(command) do
+    command
+    |> String.split()
+    |> Enum.member?("app-server")
+  end
+
+  defp codex_app_server_command?(_command), do: false
 
   defp validate_workspace_semantics(%Schema{workspace: %{strategy: "worktree"} = workspace, worker: worker}) do
     cond do

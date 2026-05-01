@@ -302,3 +302,11 @@ If Symphony documents token reporting externally, the contract should be:
 - Key totals by `thread_id`
 - Do not classify generic `usage` by field name alone
 - Do not double-count turn-completed usage after live updates
+
+## Budget Enforcement
+
+`agent.max_tokens_per_issue` and `agent.max_tokens_per_day` use the same accepted cumulative token
+totals described above. When a per-issue limit is configured, Symphony stops only the issue whose
+running total reaches the limit and does not schedule a retry. When a daily limit is configured,
+Symphony pauses new dispatch after the UTC-day total reaches the limit, while already-running agents
+continue to report tokens and finish normally.
