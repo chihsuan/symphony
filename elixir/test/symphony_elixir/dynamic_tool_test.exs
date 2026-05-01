@@ -253,11 +253,14 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       DynamicTool.execute(
         "linear_graphql",
         %{"query" => "query Viewer { viewer { id } }"},
-        linear_client: fn _query, _variables, _opts -> {:error, {:linear_api_status, 503}} end
+        linear_client: fn _query, _variables, _opts ->
+          {:error, {:linear_api_status, 503, %{"errors" => [%{"message" => "Linear is unavailable"}]}}}
+        end
       )
 
     assert Jason.decode!(status_error["output"]) == %{
              "error" => %{
+               "body" => %{"errors" => [%{"message" => "Linear is unavailable"}]},
                "message" => "Linear GraphQL request failed with HTTP 503.",
                "status" => 503
              }

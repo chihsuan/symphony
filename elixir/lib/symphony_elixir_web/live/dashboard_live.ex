@@ -258,7 +258,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <tbody>
                   <tr :for={entry <- @payload.watching}>
                     <td>
-                      <span class="issue-id"><%= entry.issue_identifier %></span>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <div class="issue-actions">
+                          <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
+                          <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                        </div>
+                      </div>
                     </td>
                     <td>
                       <span class={state_badge_class(entry.state)}>
