@@ -20,12 +20,11 @@ observability:
   transcript_buffer_size: 200
 workspace:
   root: ~/Projects/symphony-workspaces
-  # strategy: worktree
-  # repo: ~/Projects/symphony
-  # fetch_before_dispatch: true
+  strategy: worktree
+  repo: ~/Projects/symphony
+  fetch_before_dispatch: true
 hooks:
   after_create: |
-    git clone --depth 1 git@github.com:chihsuan/symphony.git .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi

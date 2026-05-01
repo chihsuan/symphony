@@ -103,9 +103,14 @@ defmodule SymphonyElixir.CoreTest do
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
+    workspace = Map.get(config, "workspace", %{})
+    assert is_map(workspace)
+    assert Map.get(workspace, "strategy") == "worktree"
+    assert Map.get(workspace, "repo") == "~/Projects/symphony"
+    assert Map.get(workspace, "fetch_before_dispatch") == true
+
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 git@github.com:chihsuan/symphony.git ."
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"

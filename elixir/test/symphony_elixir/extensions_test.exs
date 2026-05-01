@@ -559,6 +559,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "/vendor/phoenix_html/phoenix_html.js"
     assert html =~ "/vendor/phoenix/phoenix.js"
     assert html =~ "/vendor/phoenix_live_view/phoenix_live_view.js"
+    assert html =~ "TranscriptFilter"
     refute html =~ "/assets/app.js"
     refute html =~ "<style>"
 
@@ -567,6 +568,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert dashboard_css =~ ".status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+    assert dashboard_css =~ ".transcript-list[data-filter-active=\"true\"] .transcript-event"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -784,11 +786,24 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, view, html} = live(build_conn(), "/issues/MT-HTTP/transcript")
     assert html =~ "Live Transcript"
     assert html =~ "MT-HTTP"
+    assert html =~ ~s(phx-hook="TranscriptFilter")
+    assert html =~ ~s(data-transcript-filter="all")
+    assert html =~ ~s(data-transcript-filter="agent-text")
+    assert html =~ ~s(data-transcript-filter="tool-call")
+    assert html =~ ~s(data-transcript-filter="tool-result")
+    assert html =~ ~s(data-transcript-filter="session")
+    assert html =~ ~s(data-transcript-filter="error")
+    assert html =~ ~s(data-transcript-filter="event")
+    assert html =~ ~s(data-transcript-events)
+    refute html =~ "phx-click"
     assert html =~ "buffered hello"
+    assert html =~ "transcript-event-agent-text"
     assert html =~ "Tool call"
     assert html =~ "linear_graphql"
+    assert html =~ "transcript-event-tool-call"
     assert html =~ "Tool result"
     assert html =~ "buffered command output"
+    assert html =~ "transcript-event-tool-result"
 
     live_event = %{
       event: :notification,
@@ -802,7 +817,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = ObservabilityPubSub.broadcast_transcript_event("issue-http", live_event)
 
     assert_eventually(fn ->
-      render(view) =~ "mix test"
+      live_html = render(view)
+
+      live_html =~ "mix test" and live_html =~ "transcript-event-tool-call"
     end)
   end
 

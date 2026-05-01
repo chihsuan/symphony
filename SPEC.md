@@ -517,8 +517,10 @@ fields locally if they want stricter startup checks.
     add extra `writableRoots` for linked worktree Git metadata or similar adjunct paths.
   - Implementations MUST include the minimal Git metadata roots needed for branch, fetch,
     commit, and push operations: always the issue workspace `.git` path (when a workspace path
-    is available), and for linked worktree workspace strategies, also the primary clone `.git`
-    metadata root.
+    is available), plus the workspace's actual Git metadata roots when discoverable from Git
+    itself (for example `git rev-parse --git-dir --git-common-dir`). For linked worktree workspace
+    strategies where those roots are not discoverable at runtime, implementations MUST include the
+    primary clone `.git` metadata root as a fallback.
 - `network_access` (object)
   - Default `mode`: `allowlist`.
   - `mode`: one of `allowlist`, `open`, or `block`.
