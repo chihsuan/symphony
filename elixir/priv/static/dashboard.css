@@ -527,12 +527,15 @@ pre,
 }
 
 .transcript-filter-button {
+  appearance: none;
   min-height: 2rem;
   padding: 0.34rem 0.68rem;
   border-color: var(--line-strong);
-  background: rgba(255, 255, 255, 0.72);
+  border-radius: 5px;
+  background: transparent;
   color: var(--muted);
   font-size: 0.82rem;
+  font-weight: 500;
   letter-spacing: 0;
   box-shadow: none;
 }
@@ -542,13 +545,43 @@ pre,
   border-color: var(--muted);
   background: white;
   color: var(--ink);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
 }
 
 .transcript-filter-button[aria-pressed="true"] {
   border-color: rgba(16, 163, 127, 0.28);
   background: var(--accent-soft);
   color: var(--accent-ink);
+}
+
+.transcript-filter-button[data-transcript-filter="tool-call"][aria-pressed="true"] {
+  border-color: #2f6fed;
+  background: #eef4ff;
+  color: #2f6fed;
+}
+
+.transcript-filter-button[data-transcript-filter="tool-result"][aria-pressed="true"] {
+  border-color: #8a5a00;
+  background: #fff4db;
+  color: #8a5a00;
+}
+
+.transcript-filter-button[data-transcript-filter="session"][aria-pressed="true"] {
+  border-color: #7c3aed;
+  background: #f3edff;
+  color: #7c3aed;
+}
+
+.transcript-filter-button[data-transcript-filter="error"][aria-pressed="true"] {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.transcript-filter-button[data-transcript-filter="event"][aria-pressed="true"] {
+  border-color: var(--muted);
+  background: var(--card-muted);
+  color: var(--ink);
 }
 
 .transcript-list {
