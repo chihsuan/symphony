@@ -6,11 +6,12 @@ defmodule SymphonyElixir.PrLifecycleManager do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{AgentRunner, Config, RunStore, Tracker, Workspace}
+  alias SymphonyElixir.{Config, RunStore, Tracker, Workspace}
   alias SymphonyElixir.GitHub.PullRequest
   alias SymphonyElixir.Linear.Issue
 
   @in_review_state "In Review"
+  @active_state "In Progress"
   @changes_requested "CHANGES_REQUESTED"
   @approved "APPROVED"
   @closed_pr_states ["CLOSED", "MERGED"]
@@ -19,7 +20,7 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
   defmodule State do
     @moduledoc false
-    defstruct [:timer_ref, opts: []]
+    defstruct [:timer_ref, :poll_interval_ms, opts: []]
   end
 
   @type poll_summary :: %{
@@ -36,7 +37,10 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
   @impl true
   def init(opts) do
-    {:ok, schedule_poll(%State{opts: opts}, 0)}
+    poll_interval_ms = poll_interval_ms(opts)
+    opts = Keyword.put(opts, :poll_interval_ms, poll_interval_ms)
+
+    {:ok, schedule_poll(%State{opts: opts, poll_interval_ms: poll_interval_ms}, 0)}
   end
 
   @impl true
@@ -49,7 +53,7 @@ defmodule SymphonyElixir.PrLifecycleManager do
         Logger.warning("PR lifecycle poll failed: #{inspect(reason)}")
     end
 
-    {:noreply, schedule_poll(state, poll_interval_ms(state.opts))}
+    {:noreply, schedule_poll(state, state.poll_interval_ms)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -57,14 +61,21 @@ defmodule SymphonyElixir.PrLifecycleManager do
   @doc false
   @spec poll_once(keyword()) :: {:ok, poll_summary()} | {:error, term()}
   def poll_once(opts \\ []) when is_list(opts) do
-    settings = Keyword.get(opts, :settings) || Config.settings!()
+    with {:ok, settings} <- poll_settings(opts) do
+      case settings.pr_lifecycle.mode do
+        "daemon" ->
+          do_poll_once(settings, opts)
 
-    case settings.pr_lifecycle.mode do
-      "daemon" ->
-        do_poll_once(settings, opts)
+        _mode ->
+          {:ok, %{mode: :linear, discovered: 0, processed: 0, actions: []}}
+      end
+    end
+  end
 
-      _mode ->
-        {:ok, %{mode: :linear, discovered: 0, processed: 0, actions: []}}
+  defp poll_settings(opts) do
+    case Keyword.fetch(opts, :settings) do
+      {:ok, settings} -> {:ok, settings}
+      :error -> Config.settings()
     end
   end
 
@@ -74,11 +85,10 @@ defmodule SymphonyElixir.PrLifecycleManager do
     tracker = Keyword.get(opts, :tracker, Tracker)
 
     with {:ok, discovered} <- discover_lifecycles(run_store, tracker, now),
-         {:ok, lifecycles} <- list_pr_lifecycles(run_store),
-         {:ok, issues_by_id} <- fetch_lifecycle_issues(tracker, lifecycles) do
+         {:ok, lifecycles} <- list_pr_lifecycles(run_store) do
       actions =
         lifecycles
-        |> Enum.map(&process_lifecycle(&1, Map.get(issues_by_id, Map.get(&1, :issue_id)), settings, opts, now))
+        |> Enum.map(&process_lifecycle(&1, settings, opts, now))
 
       {:ok, %{mode: :daemon, discovered: discovered, processed: length(lifecycles), actions: actions}}
     end
@@ -143,22 +153,22 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
   defp discover_lifecycle_record(_issue, _runs, _existing, _now), do: nil
 
-  defp process_lifecycle(record, issue, settings, opts, now) when is_map(record) do
+  defp process_lifecycle(record, settings, opts, now) when is_map(record) do
     case backoff_active_until(record, now) do
       {:backing_off, next_poll_at} ->
         {:backing_off, Map.get(record, :issue_id), next_poll_at}
 
       :ready ->
-        fetch_and_process_lifecycle(record, issue, settings, opts, now)
+        fetch_and_process_lifecycle(record, settings, opts, now)
     end
   end
 
-  defp fetch_and_process_lifecycle(record, issue, settings, opts, now) do
+  defp fetch_and_process_lifecycle(record, settings, opts, now) do
     github = Keyword.get(opts, :github, PullRequest)
 
     case github.fetch_activity(Map.get(record, :pr_url), cwd: Map.get(record, :workspace_path)) do
       {:ok, activity} ->
-        handle_activity(record, issue_for_record(issue, record), activity, settings, opts, now)
+        handle_activity(record, activity, settings, opts, now)
 
       {:error, reason} ->
         record_poll_error(record, reason, opts, now)
@@ -177,21 +187,21 @@ defmodule SymphonyElixir.PrLifecycleManager do
     end
   end
 
-  defp handle_activity(record, issue, activity, settings, opts, now) do
+  defp handle_activity(record, activity, settings, opts, now) do
     {attrs, latest_activity_at} = lifecycle_activity_attrs(record, activity, now)
 
     case lifecycle_action(activity, latest_activity_at, settings, now) do
       :closed ->
         cleanup_lifecycle(record, opts, now, "closed")
 
-      :stale ->
-        cleanup_lifecycle(record, opts, now, "stale")
-
       :changes_requested ->
-        maybe_spawn_rework(record, issue, activity, attrs, settings, opts, now)
+        maybe_transition_rework(record, attrs, settings, opts, now)
 
       :approved ->
-        maybe_spawn_merge(record, issue, activity, attrs, opts, now)
+        maybe_transition_merge(record, attrs, opts, now)
+
+      :stale ->
+        cleanup_lifecycle(record, opts, now, "stale")
 
       :watching ->
         complete_lifecycle_update(opts, record, attrs, {:watching, Map.get(record, :issue_id)})
@@ -229,14 +239,14 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
     cond do
       closed_pr_state?(Map.get(activity, :state)) -> :closed
-      stale?(latest_activity_at, now, settings.pr_lifecycle.stale_days) -> :stale
       review_decision == @changes_requested -> :changes_requested
       review_decision == @approved -> :approved
+      stale?(latest_activity_at, now, settings.pr_lifecycle.stale_days) -> :stale
       true -> :watching
     end
   end
 
-  defp maybe_spawn_rework(record, issue, activity, attrs, settings, opts, now) do
+  defp maybe_transition_rework(record, attrs, settings, opts, now) do
     latest_activity_at = action_activity_at(attrs)
 
     cond do
@@ -247,21 +257,17 @@ defmodule SymphonyElixir.PrLifecycleManager do
         complete_lifecycle_update(opts, record, Map.merge(attrs, %{status: "cooling_down"}), {:cooling_down, Map.get(record, :issue_id)})
 
       true ->
-        prompt = rework_prompt(record, activity, settings)
-
-        finish_spawn_action(fn -> spawn_agent(issue, record, prompt, opts) end, record, attrs, opts, now, "rework")
+        transition_issue_for_action(record, attrs, opts, now, "rework")
     end
   end
 
-  defp maybe_spawn_merge(record, issue, activity, attrs, opts, now) do
+  defp maybe_transition_merge(record, attrs, opts, now) do
     latest_activity_at = action_activity_at(attrs)
 
     if handled_activity?(record, latest_activity_at) do
       complete_lifecycle_update(opts, record, attrs, {:already_handled, Map.get(record, :issue_id), :merge})
     else
-      prompt = merge_prompt(record, activity)
-
-      finish_spawn_action(fn -> spawn_agent(issue, record, prompt, opts) end, record, attrs, opts, now, "merge")
+      transition_issue_for_action(record, attrs, opts, now, "merge")
     end
   end
 
@@ -269,54 +275,45 @@ defmodule SymphonyElixir.PrLifecycleManager do
     Map.get(attrs, :last_review_activity_at) || Map.fetch!(attrs, :last_activity_at)
   end
 
-  defp finish_spawn_action(spawn_fun, record, attrs, opts, now, action) when is_function(spawn_fun, 0) do
-    case reserve_spawn_action(record, attrs, opts, now, action) do
+  defp transition_issue_for_action(record, attrs, opts, now, action) do
+    tracker = Keyword.get(opts, :tracker, Tracker)
+    issue_id = Map.get(record, :issue_id)
+
+    case tracker.update_issue_state(issue_id, @active_state) do
       :ok ->
-        complete_spawn_action(spawn_fun.(), record, attrs, opts, now, action)
+        complete_transition_action(record, attrs, opts, now, action)
 
       {:error, reason} ->
-        {:spawn_reservation_error, Map.get(record, :issue_id), action_atom(action), reason}
+        record_transition_error(record, attrs, opts, now, action, reason)
     end
   end
 
-  defp reserve_spawn_action(record, attrs, opts, now, action) do
-    update_lifecycle(
-      opts,
-      record,
-      Map.merge(attrs, %{
-        status: "#{action}_spawning",
-        error: nil,
-        last_action: action,
-        last_action_at: now,
-        updated_at: now
-      })
-    )
-  end
-
-  defp complete_spawn_action(:ok, record, attrs, opts, now, action) do
+  defp complete_transition_action(record, attrs, opts, now, action) do
     case update_lifecycle(
            opts,
            record,
            Map.merge(attrs, %{
-             status: "#{action}_spawned",
+             status: "#{action}_requested",
+             target_issue_state: @active_state,
              last_action: action,
-             last_action_at: now
+             last_action_at: now,
+             updated_at: now
            })
          ) do
       :ok ->
-        {:spawned, Map.get(record, :issue_id), action_atom(action)}
+        {:state_transitioned, Map.get(record, :issue_id), action_atom(action), @active_state}
 
       {:error, reason} ->
-        {:spawn_update_error, Map.get(record, :issue_id), action_atom(action), reason}
+        {:state_transition_update_error, Map.get(record, :issue_id), action_atom(action), reason}
     end
   end
 
-  defp complete_spawn_action({:error, reason}, record, attrs, opts, now, action) do
+  defp record_transition_error(record, attrs, opts, now, action, reason) do
     case update_lifecycle(
            opts,
            record,
            Map.merge(attrs, %{
-             status: "spawn_error",
+             status: "state_transition_error",
              error: inspect(reason),
              last_action: action,
              last_action_at: nil,
@@ -324,10 +321,10 @@ defmodule SymphonyElixir.PrLifecycleManager do
            })
          ) do
       :ok ->
-        {:spawn_error, Map.get(record, :issue_id), action_atom(action), reason}
+        {:state_transition_error, Map.get(record, :issue_id), action_atom(action), reason}
 
       {:error, update_reason} ->
-        {:spawn_error_update_failed, Map.get(record, :issue_id), action_atom(action), reason, update_reason}
+        {:state_transition_error_update_failed, Map.get(record, :issue_id), action_atom(action), reason, update_reason}
     end
   end
 
@@ -335,147 +332,73 @@ defmodule SymphonyElixir.PrLifecycleManager do
     workspace = Keyword.get(opts, :workspace, Workspace)
     run_store = Keyword.get(opts, :run_store, RunStore)
 
-    case workspace.remove(Map.get(record, :workspace_path), Map.get(record, :worker_host)) do
-      {:ok, _removed_paths} ->
-        case run_store.delete_pr_lifecycle(Map.get(record, :issue_id)) do
-          :ok ->
-            {:cleanup, Map.get(record, :issue_id), reason}
+    if workspace_removed?(record) do
+      delete_lifecycle_after_cleanup(run_store, record, reason)
+    else
+      case workspace.remove(Map.get(record, :workspace_path), Map.get(record, :worker_host)) do
+        {:ok, _removed_paths} ->
+          updated_record = mark_workspace_removed(record, opts, now)
+          delete_lifecycle_after_cleanup(run_store, updated_record, reason)
 
-          {:error, delete_reason} ->
-            Logger.warning("Failed to delete PR lifecycle record issue_id=#{Map.get(record, :issue_id)} after cleanup: #{inspect(delete_reason)}")
+        {:error, cleanup_reason, output} ->
+          complete_lifecycle_update(
+            opts,
+            record,
+            %{
+              status: "cleanup_error",
+              error: inspect({cleanup_reason, output}),
+              updated_at: now
+            },
+            {:cleanup_error, Map.get(record, :issue_id), cleanup_reason}
+          )
 
-            {:cleanup_error, Map.get(record, :issue_id), delete_reason}
-        end
-
-      {:error, cleanup_reason, output} ->
-        complete_lifecycle_update(
-          opts,
-          record,
-          %{
-            status: "cleanup_error",
-            error: inspect({cleanup_reason, output}),
-            updated_at: now
-          },
-          {:cleanup_error, Map.get(record, :issue_id), cleanup_reason}
-        )
-
-      other ->
-        complete_lifecycle_update(
-          opts,
-          record,
-          %{
-            status: "cleanup_error",
-            error: inspect(other),
-            updated_at: now
-          },
-          {:cleanup_error, Map.get(record, :issue_id), other}
-        )
+        other ->
+          complete_lifecycle_update(
+            opts,
+            record,
+            %{
+              status: "cleanup_error",
+              error: inspect(other),
+              updated_at: now
+            },
+            {:cleanup_error, Map.get(record, :issue_id), other}
+          )
+      end
     end
   end
 
-  defp spawn_agent(%Issue{} = issue, record, prompt, opts) do
-    run_opts = [
-      workspace_path: Map.get(record, :workspace_path),
-      worker_host: Map.get(record, :worker_host),
-      extra_prompt: prompt,
-      max_turns: 1
-    ]
-
-    opts
-    |> agent_starter()
-    |> then(& &1.(issue, run_opts))
-  end
-
-  defp agent_starter(opts) do
-    case Keyword.get(opts, :agent_starter) do
-      starter when is_function(starter, 2) -> starter
-      _ -> &start_agent_task(&1, &2, opts)
-    end
-  end
-
-  defp start_agent_task(issue, run_opts, opts) do
-    task_supervisor = Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor)
-    agent_runner = Keyword.get(opts, :agent_runner, AgentRunner)
-
-    case Task.Supervisor.start_child(task_supervisor, fn -> agent_runner.run(issue, nil, run_opts) end) do
-      {:ok, _pid} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp rework_prompt(record, activity, settings) do
-    """
-    PR lifecycle daemon event:
-
-    GitHub reports requested changes for #{Map.get(record, :pr_url)}. Waited at least #{settings.pr_lifecycle.cooldown_minutes} minute(s) since the latest review activity before starting this run.
-
-    Continue in the existing workspace, address every actionable review comment below, rerun the relevant validation, push the branch, and keep the issue in review unless a true blocker remains.
-
-    Review comments:
-    #{format_comments(Map.get(activity, :comments, []))}
-    """
-    |> String.trim()
-  end
-
-  defp merge_prompt(record, _activity) do
-    """
-    PR lifecycle daemon event:
-
-    GitHub reports approval for #{Map.get(record, :pr_url)}. Continue in the existing workspace and execute the repository landing flow for the approved PR. Follow the local `land` skill instructions; do not call `gh pr merge` directly outside that flow.
-    """
-    |> String.trim()
-  end
-
-  defp format_comments([]), do: "- No review comment bodies were returned by GitHub; inspect the PR before changing code."
-
-  defp format_comments(comments) when is_list(comments) do
-    comments
-    |> Enum.reject(&blank?(Map.get(&1, :body)))
-    |> Enum.map_join("\n\n", fn comment ->
-      author = Map.get(comment, :author) || "unknown"
-      kind = Map.get(comment, :kind) || "comment"
-      url = Map.get(comment, :url) || "no URL"
-
-      "- #{kind} by #{author} (#{url}):\n  " <>
-        (comment
-         |> Map.get(:body, "")
-         |> String.split("\n")
-         |> Enum.map_join("\n  ", &String.trim_trailing/1))
-    end)
-    |> case do
-      "" -> format_comments([])
-      formatted -> formatted
-    end
-  end
-
-  defp issue_for_record(%Issue{} = issue, _record), do: issue
-
-  defp issue_for_record(_issue, record) do
-    %Issue{
-      id: Map.get(record, :issue_id),
-      identifier: Map.get(record, :issue_identifier),
-      title: "PR lifecycle follow-up",
-      state: @in_review_state,
-      url: Map.get(record, :issue_url),
-      pr_urls: [Map.get(record, :pr_url)] |> Enum.reject(&is_nil/1)
+  defp mark_workspace_removed(record, opts, now) do
+    attrs = %{
+      status: "cleanup_pending",
+      error: nil,
+      workspace_removed_at: now,
+      updated_at: now
     }
-  end
 
-  defp fetch_lifecycle_issues(_tracker, []), do: {:ok, %{}}
-
-  defp fetch_lifecycle_issues(tracker, lifecycles) do
-    issue_ids =
-      lifecycles
-      |> Enum.map(&Map.get(&1, :issue_id))
-      |> Enum.filter(&is_binary/1)
-      |> Enum.uniq()
-
-    case tracker.fetch_issue_states_by_ids(issue_ids) do
-      {:ok, issues} ->
-        {:ok, Map.new(issues, fn %Issue{id: id} = issue -> {id, issue} end)}
+    case update_lifecycle(opts, record, attrs) do
+      :ok ->
+        Map.merge(record, attrs)
 
       {:error, reason} ->
-        {:error, reason}
+        Logger.warning("Failed to mark PR lifecycle workspace removed issue_id=#{Map.get(record, :issue_id)}: #{inspect(reason)}")
+        record
+    end
+  end
+
+  defp workspace_removed?(record) do
+    match?(%DateTime{}, Map.get(record, :workspace_removed_at)) or
+      Map.get(record, :status) == "cleanup_pending"
+  end
+
+  defp delete_lifecycle_after_cleanup(run_store, record, reason) do
+    case run_store.delete_pr_lifecycle(Map.get(record, :issue_id)) do
+      :ok ->
+        {:cleanup, Map.get(record, :issue_id), reason}
+
+      {:error, delete_reason} ->
+        Logger.warning("Failed to delete PR lifecycle record issue_id=#{Map.get(record, :issue_id)} after cleanup: #{inspect(delete_reason)}")
+
+        {:cleanup_error, Map.get(record, :issue_id), delete_reason}
     end
   end
 
@@ -645,12 +568,11 @@ defmodule SymphonyElixir.PrLifecycleManager do
 
   defp poll_interval_ms(opts) do
     case Keyword.get(opts, :poll_interval_ms) do
-      interval when is_integer(interval) and interval > 0 -> interval
-      _ -> Config.settings!().polling.interval_ms
+      interval when is_integer(interval) and interval > 0 ->
+        interval
+
+      _ ->
+        Config.settings!().polling.interval_ms
     end
   end
-
-  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
-  defp blank?(nil), do: true
-  defp blank?(_value), do: false
 end

@@ -428,7 +428,7 @@ Fields:
   - `daemon` starts a PR lifecycle manager alongside the orchestrator.
 - `cooldown_minutes` (integer)
   - Daemon-mode default: `10`.
-  - Applies only in `daemon` mode before spawning a rework agent for requested changes.
+  - Applies only in `daemon` mode before moving an issue back to an active state for requested changes.
 - `stale_days` (integer)
   - Daemon-mode default: `7`.
   - Applies only in `daemon` mode before reclaiming idle tracked PR workspaces.
@@ -822,14 +822,16 @@ The manager:
 - discovers issues in `In Review` with attached GitHub PR URLs;
 - records each PR URL, issue id, and workspace path in the durable run store;
 - polls GitHub for review decisions and PR closure;
-- waits `pr_lifecycle.cooldown_minutes` after requested-change activity before spawning a rework
-  worker with review comments appended to the prompt;
-- spawns a merge worker when GitHub reports approval;
+- waits `pr_lifecycle.cooldown_minutes` after requested-change activity before moving the issue
+  back to `In Progress` for orchestrator-owned rework handling;
+- moves the issue back to `In Progress` when GitHub reports approval so the orchestrator starts
+  the merge/landing workflow through the normal run path;
 - removes tracked workspaces and durable lifecycle records when PRs close or remain idle beyond
   `pr_lifecycle.stale_days`.
 
-The orchestrator continues to own normal active-state dispatch, retry, and reconciliation. The PR
-lifecycle manager owns only daemon-mode post-review PR actions.
+The orchestrator continues to own active-state dispatch, retry, run-store run records, and
+dashboard-visible agent execution. The PR lifecycle manager owns only daemon-mode GitHub polling,
+state transitions, and tracked PR cleanup.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
