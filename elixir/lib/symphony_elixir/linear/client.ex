@@ -7,10 +7,11 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.{Config, Linear.Issue}
 
   @issue_page_size 50
+  @attachment_page_size 20
   @max_error_body_log_bytes 1_000
 
   @query """
-  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+  query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $attachmentFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
       nodes {
         id
@@ -23,6 +24,13 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        attachments(first: $attachmentFirst) {
+          nodes {
+            title
+            url
+            sourceType
+          }
+        }
         assignee {
           id
         }
@@ -55,7 +63,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
+  query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!, $attachmentFirst: Int!) {
     issues(filter: {id: {in: $ids}}, first: $first) {
       nodes {
         id
@@ -68,6 +76,13 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        attachments(first: $attachmentFirst) {
+          nodes {
+            title
+            url
+            sourceType
+          }
+        }
         assignee {
           id
         }
@@ -280,6 +295,7 @@ defmodule SymphonyElixir.Linear.Client do
              stateNames: state_names,
              first: @issue_page_size,
              relationFirst: @issue_page_size,
+             attachmentFirst: @attachment_page_size,
              after: after_cursor
            }),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
@@ -345,7 +361,8 @@ defmodule SymphonyElixir.Linear.Client do
     case graphql_fun.(@query_by_ids, %{
            ids: batch_ids,
            first: length(batch_ids),
-           relationFirst: @issue_page_size
+           relationFirst: @issue_page_size,
+           attachmentFirst: @attachment_page_size
          }) do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response(body, assignee_filter) do
@@ -508,6 +525,7 @@ defmodule SymphonyElixir.Linear.Client do
       state: get_in(issue, ["state", "name"]),
       branch_name: issue["branchName"],
       url: issue["url"],
+      pull_request_url: extract_pull_request_url(issue),
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
@@ -597,6 +615,59 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_pull_request_url(%{"attachments" => %{"nodes" => attachments}})
+       when is_list(attachments) do
+    Enum.find_value(attachments, &pull_request_attachment_url/1)
+  end
+
+  defp extract_pull_request_url(_issue), do: nil
+
+  defp pull_request_attachment_url(%{"url" => url} = attachment) when is_binary(url) do
+    source_type = attachment["sourceType"]
+
+    if github_pull_request_url?(url, source_type) do
+      url
+    end
+  end
+
+  defp pull_request_attachment_url(_attachment), do: nil
+
+  defp github_pull_request_url?(url, source_type) do
+    case URI.parse(url) do
+      %URI{host: host, path: path} when is_binary(host) and is_binary(path) ->
+        (github_source?(source_type) or github_host?(host)) and github_pull_request_path?(path)
+
+      _ ->
+        false
+    end
+  end
+
+  defp github_source?(source_type) when is_binary(source_type) do
+    source_type
+    |> String.trim()
+    |> String.downcase()
+    |> Kernel.==("github")
+  end
+
+  defp github_source?(_source_type), do: false
+
+  defp github_host?(host) when is_binary(host) do
+    normalized_host = String.downcase(host)
+
+    normalized_host in ["github.com", "www.github.com"] or
+      String.ends_with?(normalized_host, ".github.com") or
+      String.starts_with?(normalized_host, "github.")
+  end
+
+  defp github_pull_request_path?(path) when is_binary(path) do
+    path
+    |> String.split("/", trim: true)
+    |> case do
+      [_owner, _repo, "pull", pull_number | _rest] -> pull_number =~ ~r/^\d+$/
+      _path_parts -> false
+    end
+  end
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

@@ -1551,12 +1551,14 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: 0,
       last_event: Map.get(running_entry, :last_codex_event),
       last_event_at: Map.get(running_entry, :last_codex_timestamp),
-      pull_request_url: URLUtils.pull_request_url(running_entry),
+      pull_request_url: URLUtils.pull_request_url(running_entry) || URLUtils.pull_request_url(issue),
       updated_at: now
     }
   end
 
   defp run_update_from_entry(running_entry) when is_map(running_entry) do
+    issue = Map.get(running_entry, :issue)
+
     %{
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
@@ -1568,7 +1570,7 @@ defmodule SymphonyElixir.Orchestrator do
       runtime_seconds: running_seconds(Map.get(running_entry, :started_at), DateTime.utc_now()),
       last_event: Map.get(running_entry, :last_codex_event),
       last_event_at: Map.get(running_entry, :last_codex_timestamp),
-      pull_request_url: URLUtils.pull_request_url(running_entry),
+      pull_request_url: URLUtils.pull_request_url(running_entry) || URLUtils.pull_request_url(issue),
       updated_at: DateTime.utc_now()
     }
   end
@@ -1928,7 +1930,7 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       identifier: Map.get(running_entry, :identifier) || issue_identifier(issue),
       url: issue_url(issue),
-      pull_request_url: URLUtils.pull_request_url(running_entry),
+      pull_request_url: URLUtils.pull_request_url(running_entry) || URLUtils.pull_request_url(issue),
       last_ran_at: DateTime.utc_now()
     }
   end
@@ -1942,27 +1944,42 @@ defmodule SymphonyElixir.Orchestrator do
     existing = Map.get(state.watching, issue_id, %{})
 
     watching_entry = %{
-      identifier:
-        issue.identifier ||
-          Map.get(completed_metadata, :identifier) ||
-          Map.get(existing, :identifier) ||
-          issue_id,
+      identifier: watching_identifier(issue, issue_id, completed_metadata, existing),
       state: issue.state,
-      url:
-        issue_url(issue) ||
-          URLUtils.present_url(Map.get(completed_metadata, :url)) ||
-          URLUtils.present_url(Map.get(existing, :url)),
-      pull_request_url: URLUtils.pull_request_url(completed_metadata) || URLUtils.pull_request_url(existing),
-      last_ran_at:
-        Map.get(completed_metadata, :last_ran_at) ||
-          Map.get(existing, :last_ran_at) ||
-          DateTime.utc_now()
+      url: watching_url(issue, completed_metadata, existing),
+      pull_request_url: watching_pull_request_url(issue, completed_metadata, existing),
+      last_ran_at: watching_last_ran_at(completed_metadata, existing)
     }
 
     %{state | watching: Map.put(state.watching, issue_id, watching_entry)}
   end
 
   defp put_watching_issue(state, _issue), do: state
+
+  defp watching_identifier(%Issue{identifier: identifier}, issue_id, completed_metadata, existing) do
+    identifier ||
+      Map.get(completed_metadata, :identifier) ||
+      Map.get(existing, :identifier) ||
+      issue_id
+  end
+
+  defp watching_url(issue, completed_metadata, existing) do
+    issue_url(issue) ||
+      URLUtils.present_url(Map.get(completed_metadata, :url)) ||
+      URLUtils.present_url(Map.get(existing, :url))
+  end
+
+  defp watching_pull_request_url(issue, completed_metadata, existing) do
+    URLUtils.pull_request_url(issue) ||
+      URLUtils.pull_request_url(completed_metadata) ||
+      URLUtils.pull_request_url(existing)
+  end
+
+  defp watching_last_ran_at(completed_metadata, existing) do
+    Map.get(completed_metadata, :last_ran_at) ||
+      Map.get(existing, :last_ran_at) ||
+      DateTime.utc_now()
+  end
 
   defp forget_completed_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     %{

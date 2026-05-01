@@ -305,11 +305,11 @@ pre,
 
 .data-table-running {
   table-layout: fixed;
-  min-width: 980px;
+  min-width: 1080px;
 }
 
 .data-table-watching {
-  min-width: 760px;
+  min-width: 820px;
 }
 
 .data-table th {
@@ -422,11 +422,19 @@ pre,
   text-decoration: underline;
 }
 
-.issue-actions {
+.issue-actions,
+.link-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.3rem;
+}
+
+.issue-actions {
   margin-top: 0.2rem;
+}
+
+.links-cell {
+  white-space: normal;
 }
 
 .action-pill {

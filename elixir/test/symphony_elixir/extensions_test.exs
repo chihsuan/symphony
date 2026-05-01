@@ -636,6 +636,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Runtime"
     assert html =~ "Live"
     assert html =~ "Offline"
+    assert Regex.scan(~r/<th>Links<\/th>/, html) |> length() == 2
+    assert html =~ ~s(<td class="links-cell">)
+    assert html =~ ~s(<div class="link-actions">)
     assert html =~ "thread-h…"
     assert html =~ "Codex update"
     assert html =~ "/issues/MT-HTTP/transcript"

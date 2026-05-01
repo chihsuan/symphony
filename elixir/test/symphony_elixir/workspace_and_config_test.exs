@@ -507,6 +507,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.assigned_to_worker
   end
 
+  test "linear client extracts GitHub pull request attachment URLs" do
+    raw_issue = %{
+      "id" => "issue-pr",
+      "identifier" => "MT-PR",
+      "title" => "Reviewable issue",
+      "state" => %{"name" => "In Review"},
+      "attachments" => %{
+        "nodes" => [
+          %{
+            "sourceType" => "github",
+            "url" => "https://github.com/example/repo/issues/1"
+          },
+          %{
+            "sourceType" => "github",
+            "url" => "https://github.com/example/repo/pull/42"
+          }
+        ]
+      }
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue)
+
+    assert issue.pull_request_url == "https://github.com/example/repo/pull/42"
+  end
+
   test "linear client marks explicitly unassigned issues as not routed to worker" do
     raw_issue = %{
       "id" => "issue-99",

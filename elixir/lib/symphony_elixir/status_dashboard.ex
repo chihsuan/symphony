@@ -6,7 +6,7 @@ defmodule SymphonyElixir.StatusDashboard do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, HttpServer}
+  alias SymphonyElixir.{Config, HttpServer, URLUtils}
   alias SymphonyElixir.Orchestrator
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -658,8 +658,10 @@ defmodule SymphonyElixir.StatusDashboard do
     do: format_watching_summary(watching_entry, watching_url_width(terminal_columns))
 
   defp format_watching_rows(watching, watching_url_width) do
+    url_header = if Enum.any?(watching, &watching_pull_request_url/1), do: "PR / LINEAR URL", else: "LINEAR URL"
+
     base_rows = [
-      watching_table_header_row(watching_url_width),
+      watching_table_header_row(watching_url_width, url_header),
       watching_table_separator_row(watching_url_width)
     ]
 
@@ -689,7 +691,7 @@ defmodule SymphonyElixir.StatusDashboard do
     identifier = map_value(watching_entry, [:identifier, "identifier"]) || issue_id
     state = map_value(watching_entry, [:state, "state"]) || "unknown"
     seconds_since_last_run = map_value(watching_entry, [:seconds_since_last_run, "seconds_since_last_run"])
-    url = map_value(watching_entry, [:url, "url"]) || "n/a"
+    url = watching_pull_request_url(watching_entry) || watching_linear_url(watching_entry) || "n/a"
 
     [
       "│ ",
@@ -706,17 +708,29 @@ defmodule SymphonyElixir.StatusDashboard do
     |> Enum.join("")
   end
 
-  defp watching_table_header_row(watching_url_width) do
+  defp watching_table_header_row(watching_url_width, url_header) do
     header =
       [
         format_cell("ID", @watching_id_width),
         format_cell("STATE", @watching_state_width),
         format_cell("LAST RUN", @watching_age_width),
-        format_cell("LINEAR URL", watching_url_width)
+        format_cell(url_header, watching_url_width)
       ]
       |> Enum.join(" ")
 
     "│   " <> colorize(header, @ansi_gray)
+  end
+
+  defp watching_pull_request_url(watching_entry) do
+    watching_entry
+    |> map_value([:pull_request_url, "pull_request_url", :pr_url, "pr_url"])
+    |> URLUtils.present_url()
+  end
+
+  defp watching_linear_url(watching_entry) do
+    watching_entry
+    |> map_value([:url, "url"])
+    |> URLUtils.present_url()
   end
 
   defp watching_table_separator_row(watching_url_width) do

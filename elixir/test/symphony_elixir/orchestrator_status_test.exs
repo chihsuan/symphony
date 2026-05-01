@@ -1174,7 +1174,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       identifier: "MT-WATCH",
       title: "Waiting for review",
       state: "In Review",
-      url: issue_url
+      url: issue_url,
+      pull_request_url: pull_request_url
     }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [waiting_issue])
@@ -1196,7 +1197,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
             issue_id => %{
               identifier: "MT-WATCH",
               url: issue_url,
-              pull_request_url: pull_request_url,
               last_ran_at: last_ran_at
             }
           },
@@ -1752,6 +1752,34 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert plain =~ ~r/No active agents\r?\n│\s*\r?\n├─ Watching/
     assert plain =~ ~r/No watched issues\r?\n│\s*\r?\n├─ Backoff queue/
+  end
+
+  test "status dashboard shows watching PR links when available" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         watching: [
+           %{
+             issue_id: "issue-watch-pr",
+             identifier: "MT-PR",
+             state: "In Review",
+             seconds_since_last_run: 60,
+             url: "https://linear.app/a8c/issue/MT-PR",
+             pull_request_url: "https://github.com/example/repo/pull/42"
+           }
+         ],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
+
+    assert plain =~ "PR / LINEAR URL"
+    assert plain =~ "https://github.com/example/repo/pull/42"
+    refute plain =~ "https://linear.app/a8c/issue/MT-PR"
   end
 
   test "status dashboard adds a spacer line before backoff queue when agents are active" do

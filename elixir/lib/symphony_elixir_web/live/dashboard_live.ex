@@ -149,11 +149,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div class="table-wrap">
               <table class="data-table data-table-running">
                 <colgroup>
-                  <col style="width: 12rem;" />
+                  <col style="width: 10rem;" />
                   <col style="width: 8rem;" />
                   <col style="width: 7.5rem;" />
                   <col style="width: 8.5rem;" />
                   <col />
+                  <col style="width: 10rem;" />
                   <col style="width: 10rem;" />
                 </colgroup>
                 <thead>
@@ -164,6 +165,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
                     <th>Tokens</th>
+                    <th>Links</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -175,10 +177,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <% else %>
                           <span class="issue-id"><%= entry.issue_identifier %></span>
                         <% end %>
-                        <div class="issue-actions">
-                          <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
-                          <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
-                        </div>
                       </div>
                     </td>
                     <td>
@@ -225,6 +223,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
                       </div>
                     </td>
+                    <td class="links-cell">
+                      <div class="link-actions">
+                        <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
+                        <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                      </div>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -246,15 +250,17 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <div class="table-wrap">
               <table class="data-table data-table-watching">
                 <colgroup>
-                  <col style="width: 14rem;" />
+                  <col style="width: 12rem;" />
                   <col style="width: 9rem;" />
                   <col style="width: 9rem;" />
+                  <col style="width: 13rem;" />
                 </colgroup>
                 <thead>
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
                     <th>Last run</th>
+                    <th>Links</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -266,13 +272,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <% else %>
                           <span class="issue-id"><%= entry.issue_identifier %></span>
                         <% end %>
-                        <div class="issue-actions">
-                          <%= if entry.pull_request_url do %>
-                            <a class="action-pill" href={entry.pull_request_url} target="_blank" rel="noreferrer">PR</a>
-                          <% end %>
-                          <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
-                          <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
-                        </div>
                       </div>
                     </td>
                     <td>
@@ -281,6 +280,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       </span>
                     </td>
                     <td class="numeric"><%= format_last_run(entry, @now) %></td>
+                    <td class="links-cell">
+                      <div class="link-actions">
+                        <%= if entry.pull_request_url do %>
+                          <a class="action-pill" href={entry.pull_request_url} target="_blank" rel="noreferrer">PR</a>
+                        <% end %>
+                        <a class="action-pill" href={"/issues/#{entry.issue_identifier}/transcript"}>Transcript</a>
+                        <a class="action-pill" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                      </div>
+                    </td>
                   </tr>
                 </tbody>
               </table>
