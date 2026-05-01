@@ -78,35 +78,35 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </p>
         </section>
       <% else %>
-        <section class="metric-grid">
+        <section class="metric-grid dashboard-metrics">
           <article class="metric-card">
             <p class="metric-label">Running</p>
             <p class="metric-value numeric"><%= @payload.counts.running %></p>
-            <p class="metric-detail">Active issue sessions in the current runtime.</p>
+            <p class="metric-detail">active</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Watching</p>
             <p class="metric-value numeric"><%= @payload.counts.watching %></p>
-            <p class="metric-detail">Recently handled issues waiting outside active states.</p>
+            <p class="metric-detail">waiting</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Retrying</p>
             <p class="metric-value numeric"><%= @payload.counts.retrying %></p>
-            <p class="metric-detail">Issues waiting for the next retry window.</p>
+            <p class="metric-detail">backoff</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Total tokens</p>
-            <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
+            <p class="metric-value numeric"><%= format_compact_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
-              In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
+              <%= format_compact_int(@payload.codex_totals.input_tokens) %> in / <%= format_compact_int(@payload.codex_totals.output_tokens) %> out
             </p>
           </article>
 
           <article class="metric-card">
-            <p class="metric-label">Daily budget</p>
+            <p class="metric-label">Daily tokens</p>
             <p class="metric-value numeric"><%= format_budget_usage(@payload.budget.daily_used, @payload.budget.daily_limit) %></p>
             <p class="metric-detail"><%= daily_budget_detail(@payload.budget) %></p>
           </article>
@@ -114,13 +114,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <article class="metric-card">
             <p class="metric-label">Issue budget</p>
             <p class="metric-value numeric"><%= format_budget_limit(@payload.budget.per_issue_limit) %></p>
-            <p class="metric-detail">Per running issue token limit.</p>
+            <p class="metric-detail">per issue</p>
           </article>
 
           <article class="metric-card">
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-            <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+            <p class="metric-detail">completed + active</p>
           </article>
         </section>
 
@@ -421,21 +421,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_budget_usage(used, limit) when is_integer(limit) and limit > 0 do
-    "#{format_int(used)} / #{format_int(limit)}"
+    "#{format_compact_int(used)} / #{format_compact_int(limit)}"
   end
 
-  defp format_budget_usage(used, _limit), do: "#{format_int(used)} / unlimited"
+  defp format_budget_usage(used, _limit), do: format_compact_int(used)
 
-  defp format_budget_limit(limit) when is_integer(limit) and limit > 0, do: format_int(limit)
+  defp format_budget_limit(limit) when is_integer(limit) and limit > 0, do: format_compact_int(limit)
   defp format_budget_limit(_limit), do: "Unlimited"
 
-  defp daily_budget_detail(%{daily_paused: true}), do: "Paused; no new dispatch."
+  defp daily_budget_detail(%{daily_paused: true}), do: "paused"
 
   defp daily_budget_detail(%{daily_remaining: remaining}) when is_integer(remaining) do
-    "#{format_int(remaining)} tokens remaining today."
+    "#{format_compact_int(remaining)} left"
   end
 
-  defp daily_budget_detail(_budget), do: "No daily limit configured."
+  defp daily_budget_detail(_budget), do: "no limit"
 
   defp runtime_seconds_from_started_at(%DateTime{} = started_at, %DateTime{} = now) do
     DateTime.diff(now, started_at, :second)
@@ -459,6 +459,31 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_int(_value), do: "n/a"
+
+  defp format_compact_int(value) when is_integer(value) do
+    abs_value = abs(value)
+
+    cond do
+      abs_value >= 1_000_000_000 -> format_compact_number(value, 1_000_000_000, "B")
+      abs_value >= 1_000_000 -> format_compact_number(value, 1_000_000, "M")
+      abs_value >= 1_000 -> format_compact_number(value, 1_000, "K")
+      true -> Integer.to_string(value)
+    end
+  end
+
+  defp format_compact_int(_value), do: "n/a"
+
+  defp format_compact_number(value, divisor, suffix) do
+    value
+    |> Kernel./(divisor)
+    |> :erlang.float_to_binary(decimals: 1)
+    |> trim_trailing_decimal_zero()
+    |> Kernel.<>(suffix)
+  end
+
+  defp trim_trailing_decimal_zero(value) do
+    String.replace_suffix(value, ".0", "")
+  end
 
   defp state_badge_class(state) do
     base = "state-badge"
