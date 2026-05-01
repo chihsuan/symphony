@@ -367,6 +367,31 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule PrLifecycle do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @modes ["linear", "daemon"]
+
+    embedded_schema do
+      field(:mode, :string, default: "linear")
+      field(:cooldown_minutes, :integer, default: 30)
+      field(:stale_days, :integer, default: 7)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:mode, :cooldown_minutes, :stale_days], empty_values: [])
+      |> validate_required([:mode])
+      |> validate_inclusion(:mode, @modes)
+      |> validate_number(:cooldown_minutes, greater_than: 0)
+      |> validate_number(:stale_days, greater_than: 0)
+    end
+  end
+
   defmodule Server do
     @moduledoc false
     use Ecto.Schema
@@ -396,6 +421,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_many(:routing, Routing, on_replace: :delete)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:pr_lifecycle, PrLifecycle, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
@@ -566,6 +592,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:routing, with: &Routing.changeset/2)
     |> validate_unique_routing_labels()
     |> cast_embed(:observability, with: &Observability.changeset/2)
+    |> cast_embed(:pr_lifecycle, with: &PrLifecycle.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 

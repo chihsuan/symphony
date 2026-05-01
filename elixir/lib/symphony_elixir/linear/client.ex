@@ -23,6 +23,13 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        attachments {
+          nodes {
+            title
+            url
+            sourceType
+          }
+        }
         assignee {
           id
         }
@@ -68,6 +75,13 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        attachments {
+          nodes {
+            title
+            url
+            sourceType
+          }
+        }
         assignee {
           id
         }
@@ -509,6 +523,7 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      pr_urls: extract_pr_urls(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -597,6 +612,31 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_labels(_), do: []
+
+  defp extract_pr_urls(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    attachments
+    |> Enum.flat_map(&attachment_pr_urls/1)
+    |> Enum.uniq()
+  end
+
+  defp extract_pr_urls(_issue), do: []
+
+  defp attachment_pr_urls(%{"url" => url} = attachment) when is_binary(url) do
+    source_type = attachment |> Map.get("sourceType", "") |> to_string() |> String.downcase()
+    title = attachment |> Map.get("title", "") |> to_string() |> String.downcase()
+
+    if github_pr_url?(url) and (source_type == "github" or String.contains?(title, "pull request")) do
+      [url]
+    else
+      []
+    end
+  end
+
+  defp attachment_pr_urls(_attachment), do: []
+
+  defp github_pr_url?(url) when is_binary(url) do
+    String.match?(url, ~r{^https://[^/\s]*github[^/\s]*/[^/\s]+/[^/\s]+/pull/\d+(?:$|[/?#])})
+  end
 
   defp extract_blockers(%{"inverseRelations" => %{"nodes" => inverse_relations}})
        when is_list(inverse_relations) do

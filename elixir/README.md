@@ -43,9 +43,9 @@ section with its current Linear state, last-run age, and Linear URL.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+   - By default, `pr_lifecycle.mode: linear` expects the Linear workflow to drive review loops with
+     states such as "Rework" and "Merging". Set `pr_lifecycle.mode: daemon` to let Symphony poll
+     GitHub while Linear stays on the standard Todo → In Progress → In Review → Done path.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -91,6 +91,13 @@ totals so retry backoff and observability data survive process restarts.
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
 
+PR lifecycle mode is controlled by the optional `pr_lifecycle` block. `linear` is the default and
+preserves the existing human-driven review loop. In `daemon` mode, Symphony starts a
+`PrLifecycleManager` process that discovers in-review issues with attached GitHub PRs, records their
+PR URL and workspace path in the durable run store, waits `cooldown_minutes` before responding to
+requested changes, spawns a merge run when GitHub reports approval, and removes tracked workspaces
+when PRs close or stay idle beyond `stale_days`.
+
 Minimal example:
 
 ```md
@@ -122,6 +129,8 @@ codex:
     mode: allowlist
     allowed_domains: []
     denied_domains: []
+pr_lifecycle:
+  mode: linear
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.

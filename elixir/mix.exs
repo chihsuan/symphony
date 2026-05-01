@@ -14,10 +14,12 @@ defmodule SymphonyElixir.MixProject do
         ],
         ignore_modules: [
           SymphonyElixir.Config,
+          SymphonyElixir.GitHub.PullRequest,
           SymphonyElixir.Linear.Client,
           SymphonyElixir.SpecsCheck,
           SymphonyElixir.Orchestrator,
           SymphonyElixir.Orchestrator.State,
+          SymphonyElixir.PrLifecycleManager,
           SymphonyElixir.RunStore,
           SymphonyElixir.AgentRunner,
           SymphonyElixir.CLI,

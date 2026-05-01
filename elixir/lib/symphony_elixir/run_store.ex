@@ -11,12 +11,14 @@ defmodule SymphonyElixir.RunStore do
   @runs_table :symphony_run_store_runs
   @retry_table :symphony_run_store_retries
   @totals_table :symphony_run_store_totals
+  @pr_lifecycle_table :symphony_run_store_pr_lifecycles
   @tables [
     {@runs_table, [:run_id, :record]},
     {@retry_table, [:issue_id, :record]},
-    {@totals_table, [:key, :record]}
+    {@totals_table, [:key, :record]},
+    {@pr_lifecycle_table, [:issue_id, :record]}
   ]
-  @data_tables [@runs_table, @retry_table, @totals_table]
+  @data_tables [@runs_table, @retry_table, @totals_table, @pr_lifecycle_table]
   @codex_totals_key :codex_totals
 
   defmodule State do
@@ -153,6 +155,51 @@ defmodule SymphonyElixir.RunStore do
   def get_codex_totals do
     with :ok <- ensure_started() do
       transaction(&read_codex_totals/0)
+    end
+  end
+
+  @spec put_pr_lifecycle(map()) :: :ok | {:error, term()}
+  def put_pr_lifecycle(%{issue_id: issue_id} = record) when is_binary(issue_id) do
+    with :ok <- ensure_started() do
+      durable_transaction(fn ->
+        :mnesia.write({@pr_lifecycle_table, issue_id, normalize_record(record)})
+        :ok
+      end)
+    end
+  end
+
+  def put_pr_lifecycle(_record), do: {:error, :invalid_pr_lifecycle_record}
+
+  @spec update_pr_lifecycle(String.t(), map()) :: :ok | {:error, term()}
+  def update_pr_lifecycle(issue_id, attrs) when is_binary(issue_id) and is_map(attrs) do
+    with :ok <- ensure_started() do
+      update_pr_lifecycle_record(issue_id, attrs)
+      |> unwrap_nested_error()
+    end
+  end
+
+  def update_pr_lifecycle(_issue_id, _attrs), do: {:error, :invalid_pr_lifecycle_record}
+
+  @spec delete_pr_lifecycle(String.t()) :: :ok | {:error, term()}
+  def delete_pr_lifecycle(issue_id) when is_binary(issue_id) do
+    with :ok <- ensure_started() do
+      durable_transaction(fn ->
+        :mnesia.delete({@pr_lifecycle_table, issue_id})
+        :ok
+      end)
+    end
+  end
+
+  def delete_pr_lifecycle(_issue_id), do: {:error, :invalid_issue_id}
+
+  @spec list_pr_lifecycles() :: [map()] | {:error, term()}
+  def list_pr_lifecycles do
+    with :ok <- ensure_started() do
+      transaction(fn ->
+        @pr_lifecycle_table
+        |> all_records()
+        |> Enum.sort_by(&datetime_sort_key(Map.get(&1, :updated_at)), :desc)
+      end)
     end
   end
 
@@ -314,6 +361,19 @@ defmodule SymphonyElixir.RunStore do
 
         [] ->
           {:error, :run_not_found}
+      end
+    end)
+  end
+
+  defp update_pr_lifecycle_record(issue_id, attrs) do
+    durable_transaction(fn ->
+      case :mnesia.read(@pr_lifecycle_table, issue_id) do
+        [{@pr_lifecycle_table, ^issue_id, record}] ->
+          :mnesia.write({@pr_lifecycle_table, issue_id, Map.merge(record, normalize_record(attrs))})
+          :ok
+
+        [] ->
+          {:error, :pr_lifecycle_not_found}
       end
     end)
   end
